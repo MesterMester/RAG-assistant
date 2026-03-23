@@ -1,0 +1,17 @@
+.venv/
+__pycache__/
+*.pyc
+.env
+.env.*
+!.env.example
+dev-rag-db/
+data/*.json
+data/*.db
+data/*.sqlite
+data/*.sqlite3
+data/raw/
+data/cache/
+data/vectorstore/
+node_modules/
+dist/
+build/
