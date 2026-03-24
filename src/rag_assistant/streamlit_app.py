@@ -1,8 +1,10 @@
 from __future__ import annotations
 
 from datetime import date
+import subprocess
 
 import streamlit as st
+import streamlit.components.v1 as components
 
 from rag_assistant.config import load_config
 from rag_assistant.index_store import load_index, save_index
@@ -70,11 +72,46 @@ def persist_record(record: KnowledgeRecord, source_dir, config, records_path, in
 
 def collect_existing_values(records: list[KnowledgeRecord]) -> dict[str, list[str]]:
     return {
-        "organization": sorted({record.organization for record in records if record.organization}),
-        "team": sorted({record.team for record in records if record.team}),
-        "project": sorted({record.project for record in records if record.project}),
-        "case_name": sorted({record.case_name for record in records if record.case_name}),
+        "organization": sorted(
+            {record.organization for record in records if record.organization}
+            | {record.title for record in records if record.entity_type == "organization" and record.title}
+        ),
+        "team": sorted(
+            {record.team for record in records if record.team}
+            | {record.title for record in records if record.entity_type == "team" and record.title}
+        ),
+        "project": sorted(
+            {record.project for record in records if record.project}
+            | {record.title for record in records if record.entity_type == "project" and record.title}
+        ),
+        "case_name": sorted(
+            {record.case_name for record in records if record.case_name}
+            | {record.title for record in records if record.entity_type == "case" and record.title}
+        ),
     }
+
+
+def hierarchy_from_record(record: KnowledgeRecord) -> dict[str, str]:
+    return {
+        "organization": record.organization or (record.title if record.entity_type == "organization" else ""),
+        "team": record.team or (record.title if record.entity_type == "team" else ""),
+        "project": record.project or (record.title if record.entity_type == "project" else ""),
+        "case_name": record.case_name or (record.title if record.entity_type == "case" else ""),
+    }
+
+
+def apply_parent_hierarchy(records: list[KnowledgeRecord], parent_id: str, hierarchy_values: dict[str, str]) -> dict[str, str]:
+    if not parent_id:
+        return hierarchy_values
+    parent_lookup = {record.record_id: record for record in records}
+    parent_record = parent_lookup.get(parent_id)
+    if not parent_record:
+        return hierarchy_values
+    derived = hierarchy_from_record(parent_record)
+    for field_name in ["organization", "team", "project", "case_name"]:
+        if derived[field_name]:
+            hierarchy_values[field_name] = derived[field_name]
+    return hierarchy_values
 
 
 def hierarchy_fields_for(entity_type: str) -> list[str]:
@@ -173,6 +210,43 @@ def render_record_editor(key_prefix: str, records: list[KnowledgeRecord], existi
         key=f"{key_prefix}_entity_type",
     )
 
+    show_status = entity_type not in {"organization", "team", "person"}
+    show_people = entity_type in {"organization", "team", "project", "case", "task", "event", "note", "source_item", "decision"}
+    show_parent = entity_type not in {"organization"}
+    show_deadline = entity_type in {"task", "case", "project", "decision", "note", "source_item"}
+    show_event = entity_type == "event"
+    show_decision = entity_type in {"project", "case", "task", "decision", "note", "source_item"}
+
+    parent_status_people = st.columns(3)
+    if show_parent:
+        with parent_status_people[0]:
+            parent_id = render_parent_selector(records, record.parent_id, key_prefix)
+    else:
+        parent_status_people[0].caption("Szulo rekord: nem relevans ehhez az entitashoz")
+        parent_id = ""
+
+    if show_status:
+        status = parent_status_people[1].selectbox(
+            "Statusz",
+            STATUS_OPTIONS,
+            index=STATUS_OPTIONS.index(record.status) if record.status in STATUS_OPTIONS else 0,
+            key=f"{key_prefix}_status",
+        )
+    else:
+        parent_status_people[1].caption("Statusz: nem relevans ehhez az entitashoz")
+        status = record.status if record.status else "inbox"
+
+    if show_people:
+        people_raw = parent_status_people[2].text_input(
+            "Kapcsolodo emberek",
+            value=", ".join(record.related_people),
+            help="Vesszovel elvalasztva",
+            key=f"{key_prefix}_people",
+        )
+    else:
+        parent_status_people[2].caption("Kapcsolodo emberek: nem relevans ehhez az entitashoz")
+        people_raw = ""
+
     visible_fields = hierarchy_fields_for(entity_type)
     hierarchy_values = {
         "organization": record.organization,
@@ -180,6 +254,12 @@ def render_record_editor(key_prefix: str, records: list[KnowledgeRecord], existi
         "project": record.project,
         "case_name": record.case_name,
     }
+    hierarchy_values = apply_parent_hierarchy(records, parent_id, hierarchy_values)
+
+    if parent_id and any(hierarchy_values.values()):
+        st.caption(
+            f"A szulo rekord alapjan atvett hierarchia: {hierarchy_values['organization'] or '-'} / {hierarchy_values['team'] or '-'} / {hierarchy_values['project'] or '-'} / {hierarchy_values['case_name'] or '-'}"
+        )
 
     field_columns = st.columns(4)
     field_labels = {
@@ -200,43 +280,6 @@ def render_record_editor(key_prefix: str, records: list[KnowledgeRecord], existi
             else:
                 st.caption(f"{field_labels[field_name]}: nem relevans ehhez az entitashoz")
                 hierarchy_values[field_name] = ""
-
-    show_status = entity_type not in {"organization", "team", "person"}
-    show_people = entity_type in {"organization", "team", "project", "case", "task", "event", "note", "source_item", "decision"}
-    show_parent = entity_type not in {"organization"}
-    show_deadline = entity_type in {"task", "case", "project", "decision", "note", "source_item"}
-    show_event = entity_type == "event"
-    show_decision = entity_type in {"project", "case", "task", "decision", "note", "source_item"}
-
-    meta_col1, meta_col2, meta_col3 = st.columns(3)
-    if show_status:
-        status = meta_col1.selectbox(
-            "Statusz",
-            STATUS_OPTIONS,
-            index=STATUS_OPTIONS.index(record.status) if record.status in STATUS_OPTIONS else 0,
-            key=f"{key_prefix}_status",
-        )
-    else:
-        meta_col1.caption("Statusz: nem relevans ehhez az entitashoz")
-        status = record.status if record.status else "inbox"
-
-    if show_parent:
-        with meta_col2:
-            parent_id = render_parent_selector(records, record.parent_id, key_prefix)
-    else:
-        meta_col2.caption("Szulo rekord: nem relevans ehhez az entitashoz")
-        parent_id = ""
-
-    if show_people:
-        people_raw = meta_col3.text_input(
-            "Kapcsolodo emberek",
-            value=", ".join(record.related_people),
-            help="Vesszovel elvalasztva",
-            key=f"{key_prefix}_people",
-        )
-    else:
-        meta_col3.caption("Kapcsolodo emberek: nem relevans ehhez az entitashoz")
-        people_raw = ""
 
     summary = st.text_area("Rovid osszefoglalo", value=record.summary, height=100, key=f"{key_prefix}_summary")
     content = st.text_area("Reszletes tartalom", value=record.content, height=220, key=f"{key_prefix}_content")
@@ -299,15 +342,44 @@ def render_record_editor(key_prefix: str, records: list[KnowledgeRecord], existi
 
 
 def build_mindmap_lines(records: list[KnowledgeRecord]) -> list[str]:
-    lines = ["digraph G {", '  rankdir="LR";', '  node [shape=box];']
+    lines = [
+        "digraph G {",
+        '  rankdir="LR";',
+        '  graph [splines=true, overlap=false, pad="0.2"];',
+        '  node [style="filled", color="#4B5563", fontname="Helvetica", penwidth="1.2"];',
+        '  edge [color="#9CA3AF", fontname="Helvetica"];',
+    ]
     nodes: set[str] = set()
     edges: set[tuple[str, str, str]] = set()
 
-    def add_node(node_id: str, label: str, shape: str = "box") -> None:
+    def shape_for_entity(entity_type: str) -> tuple[str, str, str]:
+        mapping = {
+            "organization": ("circle", "#BFDBFE", "filled"),
+            "team": ("ellipse", "#67E8F9", "filled"),
+            "project": ("box", "#86EFAC", "rounded,filled"),
+            "task": ("box", "#FDE68A", "filled"),
+            "case": ("component", "#F9A8D4", "filled"),
+            "decision": ("diamond", "#FDA4AF", "filled"),
+            "event": ("ellipse", "#C4B5FD", "filled"),
+            "person": ("box3d", "#D1D5DB", "filled"),
+            "note": ("note", "#F5F5F4", "filled"),
+            "source_item": ("tab", "#CBD5E1", "filled"),
+        }
+        return mapping.get(entity_type, ("box", "#FDEBD0", "filled"))
+
+    def add_node(
+        node_id: str,
+        label: str,
+        shape: str = "box",
+        fillcolor: str = "#FDEBD0",
+        style: str = "filled",
+    ) -> None:
         if node_id in nodes:
             return
         nodes.add(node_id)
-        lines.append(f'  "{node_id}" [label="{label}", shape="{shape}"];')
+        lines.append(
+            f'  "{node_id}" [label="{label}", shape="{shape}", fillcolor="{fillcolor}", style="{style}"];'
+        )
 
     def add_edge(source: str, target: str, label: str) -> None:
         edge = (source, target, label)
@@ -324,25 +396,27 @@ def build_mindmap_lines(records: list[KnowledgeRecord]) -> list[str]:
 
         if record.organization:
             org_node = f"org::{record.organization}"
-            add_node(org_node, f"Org\\n{record.organization}", "folder")
+            add_node(org_node, f"Organization\n{record.organization}", "circle", "#BFDBFE", "filled")
         if record.team:
             team_node = f"team::{record.organization}::{record.team}"
-            add_node(team_node, f"Team\\n{record.team}", "folder")
+            add_node(team_node, f"Team\n{record.team}", "ellipse", "#67E8F9", "filled")
             if org_node:
                 add_edge(org_node, team_node, "contains")
         if record.project:
             project_node = f"project::{record.organization}::{record.team}::{record.project}"
-            add_node(project_node, f"Project\\n{record.project}", "folder")
-            add_edge(team_node or org_node or project_node, project_node, "contains") if (team_node or org_node) else None
+            add_node(project_node, f"Project\n{record.project}", "box", "#86EFAC", "rounded,filled")
+            if team_node or org_node:
+                add_edge(team_node or org_node, project_node, "contains")
         if record.case_name:
             case_node = f"case::{record.organization}::{record.team}::{record.project}::{record.case_name}"
-            add_node(case_node, f"Case\\n{record.case_name}", "folder")
+            add_node(case_node, f"Case\n{record.case_name}", "component", "#F9A8D4", "filled")
             parent = project_node or team_node or org_node
             if parent:
                 add_edge(parent, case_node, "contains")
 
         record_node = record.record_id
-        add_node(record_node, f"{record.title}\\n({record.entity_type})")
+        record_shape, record_fill, record_style = shape_for_entity(record.entity_type)
+        add_node(record_node, f"{record.title}\n({record.entity_type})", record_shape, record_fill, record_style)
 
         if record.parent_id:
             add_edge(record.parent_id, record_node, "parent")
@@ -356,6 +430,21 @@ def build_mindmap_lines(records: list[KnowledgeRecord]) -> list[str]:
 
     lines.append("}")
     return lines
+
+
+def render_mindmap_svg(records: list[KnowledgeRecord]) -> str | None:
+    dot_input = "\n".join(build_mindmap_lines(records))
+    try:
+        result = subprocess.run(
+            ["dot", "-Tsvg"],
+            input=dot_input,
+            capture_output=True,
+            text=True,
+            check=True,
+        )
+    except (OSError, subprocess.CalledProcessError):
+        return None
+    return result.stdout
 
 
 def app() -> None:
@@ -640,7 +729,11 @@ def app() -> None:
         if not records:
             st.info("Meg nincs megjelenitheto rekord.")
         else:
-            st.graphviz_chart("\n".join(build_mindmap_lines(records)), use_container_width=True)
+            svg = render_mindmap_svg(records)
+            if svg:
+                components.html(svg, height=720, scrolling=True)
+            else:
+                st.graphviz_chart("\n".join(build_mindmap_lines(records)), use_container_width=True)
             selected_id = st.selectbox(
                 "Rekord megnyitasa a mindmapbol",
                 options=[record.record_id for record in records],
