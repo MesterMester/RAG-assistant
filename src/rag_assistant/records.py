@@ -38,6 +38,60 @@ def save_records(path: Path, records: list[KnowledgeRecord]) -> None:
     path.write_text(json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8")
 
 
+def delete_record(path: Path, record_id: str) -> bool:
+    records = load_records(path)
+    filtered = [record for record in records if record.record_id != record_id]
+    if len(filtered) == len(records):
+        return False
+    save_records(path, filtered)
+    return True
+
+
+def normalize_records(records: list[KnowledgeRecord]) -> tuple[list[KnowledgeRecord], int]:
+    lookup = {record.record_id: record for record in records}
+    normalized: list[KnowledgeRecord] = []
+    changed = 0
+
+    def resolve_reference(value: str, expected_type: str) -> str:
+        candidate = (value or "").strip()
+        if candidate in lookup and lookup[candidate].entity_type == expected_type:
+            return lookup[candidate].title.strip()
+        return candidate
+
+    for record in records:
+        before = record.to_dict()
+        record.title = record.title.strip()
+        record.summary = record.summary.strip()
+        record.organization = resolve_reference(record.organization, "organization")
+        record.team = resolve_reference(record.team, "team")
+        record.project = resolve_reference(record.project, "project")
+        record.case_name = resolve_reference(record.case_name, "case")
+        record.parent_id = (record.parent_id or "").strip()
+
+        if record.entity_type == "organization" and not record.organization:
+            record.organization = record.title
+        if record.entity_type == "team" and not record.team:
+            record.team = record.title
+        if record.entity_type == "project" and not record.project:
+            record.project = record.title
+        if record.entity_type == "case" and not record.case_name:
+            record.case_name = record.title
+
+        if before != record.to_dict():
+            changed += 1
+        normalized.append(record)
+
+    return normalized, changed
+
+
+def normalize_record_store(path: Path) -> int:
+    records = load_records(path)
+    normalized, changed = normalize_records(records)
+    if changed:
+        save_records(path, normalized)
+    return changed
+
+
 def upsert_record(path: Path, record: KnowledgeRecord) -> KnowledgeRecord:
     records = load_records(path)
     now = utc_now_iso()

@@ -3,6 +3,7 @@ from __future__ import annotations
 from datetime import date
 import subprocess
 
+import pandas as pd
 import streamlit as st
 import streamlit.components.v1 as components
 
@@ -10,11 +11,11 @@ from rag_assistant.config import load_config
 from rag_assistant.index_store import load_index, save_index
 from rag_assistant.ingest import build_index
 from rag_assistant.models import KnowledgeRecord
-from rag_assistant.records import build_record_id, load_records, upsert_record
+from rag_assistant.records import build_record_id, delete_record, load_records, normalize_records, save_records, upsert_record
 from rag_assistant.search import search_chunks
 from rag_assistant.vector_store import VectorStoreError, upsert_manual_records
 
-STATUS_OPTIONS = ["inbox", "next", "active", "waiting", "done", "archived"]
+STATUS_OPTIONS = ["inbox", "next", "active", "waiting", "done", "cancelled", "archived"]
 ENTITY_OPTIONS = [
     "organization",
     "team",
@@ -68,6 +69,58 @@ def persist_record(record: KnowledgeRecord, source_dir, config, records_path, in
     except VectorStoreError as exc:
         st.warning(f"Chroma upsert kihagyva: {exc}")
     st.rerun()
+
+
+def parse_csv_list(value: str) -> list[str]:
+    return [item.strip() for item in (value or "").split(",") if item.strip()]
+
+
+def normalize_table_value(value) -> str:
+    if pd.isna(value):
+        return ""
+    return str(value).strip()
+
+
+def persist_records_bulk(records: list[KnowledgeRecord], source_dir, config, records_path, index_path, chroma_dir, success_message: str) -> None:
+    save_records(records_path, records)
+    refreshed_records = load_records(records_path)
+    chunks = build_index(source_dir, config)
+    save_index(index_path, chunks)
+    st.success(success_message)
+    st.info(f"Keyword index frissitve: {len(chunks)} chunk")
+    try:
+        count = upsert_manual_records(refreshed_records, chroma_dir, config.ollama_embed_model)
+        st.info(f"Chroma upsert kesz: {count} rekord.")
+    except VectorStoreError as exc:
+        st.warning(f"Chroma upsert kihagyva: {exc}")
+    st.rerun()
+
+
+def record_from_table_row(row: dict, existing: KnowledgeRecord) -> KnowledgeRecord:
+    deadline = normalize_table_value(row.get("deadline")) or None
+    event_at = normalize_table_value(row.get("event_at")) or None
+    return KnowledgeRecord(
+        record_id=existing.record_id,
+        title=normalize_table_value(row.get("title")) or existing.title,
+        summary=normalize_table_value(row.get("summary")) if "summary" in row else existing.summary,
+        content=existing.content,
+        source_type=existing.source_type,
+        entity_type=normalize_table_value(row.get("entity_type")) or existing.entity_type,
+        status=normalize_table_value(row.get("status")) or existing.status,
+        organization=normalize_table_value(row.get("organization")),
+        team=normalize_table_value(row.get("team")),
+        project=normalize_table_value(row.get("project")),
+        case_name=normalize_table_value(row.get("case")),
+        parent_id=normalize_table_value(row.get("parent_id")),
+        related_people=parse_csv_list(normalize_table_value(row.get("people"))),
+        tags=parse_csv_list(normalize_table_value(row.get("tags"))),
+        relations=list(existing.relations),
+        decision_needed=bool(row.get("decision_needed")),
+        decision_context=existing.decision_context,
+        created_at=existing.created_at,
+        deadline=deadline,
+        event_at=event_at,
+    )
 
 
 def collect_existing_values(records: list[KnowledgeRecord]) -> dict[str, list[str]]:
@@ -351,6 +404,7 @@ def build_mindmap_lines(records: list[KnowledgeRecord]) -> list[str]:
     ]
     nodes: set[str] = set()
     edges: set[tuple[str, str, str]] = set()
+    lookup = {record.record_id: record for record in records}
 
     def shape_for_entity(entity_type: str) -> tuple[str, str, str]:
         mapping = {
@@ -414,16 +468,38 @@ def build_mindmap_lines(records: list[KnowledgeRecord]) -> list[str]:
             if parent:
                 add_edge(parent, case_node, "contains")
 
-        record_node = record.record_id
-        record_shape, record_fill, record_style = shape_for_entity(record.entity_type)
-        add_node(record_node, f"{record.title}\n({record.entity_type})", record_shape, record_fill, record_style)
-
-        if record.parent_id:
-            add_edge(record.parent_id, record_node, "parent")
+        if record.entity_type == "organization" and org_node:
+            record_node = org_node
+        elif record.entity_type == "team" and team_node:
+            record_node = team_node
+        elif record.entity_type == "project" and project_node:
+            record_node = project_node
+        elif record.entity_type == "case" and case_node:
+            record_node = case_node
         else:
-            container_parent = case_node or project_node or team_node or org_node
-            if container_parent:
-                add_edge(container_parent, record_node, "item")
+            record_node = record.record_id
+            record_shape, record_fill, record_style = shape_for_entity(record.entity_type)
+            add_node(record_node, f"{record.title}\n({record.entity_type})", record_shape, record_fill, record_style)
+
+        is_hierarchy_record = record.entity_type in {"organization", "team", "project", "case"}
+        if not is_hierarchy_record:
+            if record.parent_id:
+                parent_record = lookup.get(record.parent_id)
+                if parent_record and parent_record.entity_type == "organization":
+                    parent_node = f"org::{parent_record.organization or parent_record.title}"
+                elif parent_record and parent_record.entity_type == "team":
+                    parent_node = f"team::{parent_record.organization}::{parent_record.team or parent_record.title}"
+                elif parent_record and parent_record.entity_type == "project":
+                    parent_node = f"project::{parent_record.organization}::{parent_record.team}::{parent_record.project or parent_record.title}"
+                elif parent_record and parent_record.entity_type == "case":
+                    parent_node = f"case::{parent_record.organization}::{parent_record.team}::{parent_record.project}::{parent_record.case_name or parent_record.title}"
+                else:
+                    parent_node = record.parent_id
+                add_edge(parent_node, record_node, "parent")
+            else:
+                container_parent = case_node or project_node or team_node or org_node
+                if container_parent:
+                    add_edge(container_parent, record_node, "item")
 
         for relation in record.relations:
             add_edge(record_node, relation, "rel")
@@ -462,6 +538,9 @@ def app() -> None:
     index_path = config.index_path_for(source_dir)
     chroma_dir = config.chroma_dir_for(source_dir)
     records = load_records(records_path)
+    records, normalized_count = normalize_records(records)
+    if normalized_count:
+        save_records(records_path, records)
     existing_values = collect_existing_values(records)
     selected_record = get_selected_record(records)
 
@@ -592,7 +671,77 @@ def app() -> None:
 
             rows = [record.to_table_row() for record in filtered_records]
             if rows:
-                st.dataframe(rows, use_container_width=True)
+                st.caption("A tabla itt helyben szerkesztheto. A valtozasok az Alkalmaz gombbal irhatok vissza.")
+                table_df = pd.DataFrame(rows)
+                edited_df = st.data_editor(
+                    table_df,
+                    use_container_width=True,
+                    hide_index=True,
+                    key="records_table_editor",
+                    disabled=["record_id", "updated_at"],
+                    column_config={
+                        "entity_type": st.column_config.SelectboxColumn("entitas", options=ENTITY_OPTIONS, required=True),
+                        "status": st.column_config.SelectboxColumn("statusz", options=STATUS_OPTIONS, required=True),
+                        "decision_needed": st.column_config.CheckboxColumn("dontes?"),
+                        "record_id": st.column_config.TextColumn("record_id", disabled=True),
+                        "updated_at": st.column_config.TextColumn("updated_at", disabled=True),
+                    },
+                )
+
+                action_col1, action_col2 = st.columns([2, 1])
+                with action_col1:
+                    if st.button("Tablazat valtozasainak alkalmazasa", key="apply_table_changes"):
+                        record_lookup = {record.record_id: record for record in records}
+                        edited_rows = edited_df.to_dict("records")
+                        updated_lookup = {}
+                        changed_count = 0
+                        for row in edited_rows:
+                            record_id = normalize_table_value(row.get("record_id"))
+                            existing = record_lookup.get(record_id)
+                            if not existing:
+                                continue
+                            updated = record_from_table_row(row, existing)
+                            if updated.to_dict() != existing.to_dict():
+                                changed_count += 1
+                            updated_lookup[record_id] = updated
+
+                        merged_records = [updated_lookup.get(record.record_id, record) for record in records]
+                        if changed_count == 0:
+                            st.info("Nincs alkalmazando tablazatmodositas.")
+                        else:
+                            persist_records_bulk(
+                                merged_records,
+                                source_dir,
+                                config,
+                                records_path,
+                                index_path,
+                                chroma_dir,
+                                f"Tablazat valtozasai mentve: {changed_count} rekord.",
+                            )
+
+                with action_col2:
+                    delete_id = st.selectbox(
+                        "Torlendo rekord",
+                        options=[record.record_id for record in filtered_records],
+                        format_func=lambda record_id: record_label(next(record for record in filtered_records if record.record_id == record_id)),
+                        key="table_delete_picker",
+                    )
+                    if st.button("Kijelolt rekord torlese", key="delete_from_table"):
+                        removed = delete_record(records_path, delete_id)
+                        if not removed:
+                            st.warning("A rekord mar nem talalhato.")
+                        else:
+                            refreshed_records = load_records(records_path)
+                            persist_records_bulk(
+                                refreshed_records,
+                                source_dir,
+                                config,
+                                records_path,
+                                index_path,
+                                chroma_dir,
+                                "Rekord torolve a tablazatnezetbol.",
+                            )
+
                 selected_id = st.selectbox(
                     "Rekord megnyitasa a tablazatbol",
                     options=[record.record_id for record in filtered_records],

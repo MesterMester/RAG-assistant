@@ -114,6 +114,7 @@ class KnowledgeRecord:
             "record_id": self.record_id,
             "entity_type": self.entity_type,
             "title": self.title,
+            "summary": self.summary,
             "organization": self.organization,
             "team": self.team,
             "project": self.project,
