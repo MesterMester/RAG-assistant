@@ -398,9 +398,9 @@ def build_mindmap_lines(records: list[KnowledgeRecord]) -> list[str]:
     lines = [
         "digraph G {",
         '  rankdir="LR";',
-        '  graph [splines=true, overlap=false, pad="0.2"];',
+        '  graph [splines=curved, overlap=false, pad="0.2"];',
         '  node [style="filled", color="#4B5563", fontname="Helvetica", penwidth="1.2"];',
-        '  edge [color="#9CA3AF", fontname="Helvetica"];',
+        '  edge [color="#9CA3AF", arrowsize="0.8", penwidth="1.1"];',
     ]
     nodes: set[str] = set()
     edges: set[tuple[str, str, str]] = set()
@@ -409,13 +409,13 @@ def build_mindmap_lines(records: list[KnowledgeRecord]) -> list[str]:
     def shape_for_entity(entity_type: str) -> tuple[str, str, str]:
         mapping = {
             "organization": ("circle", "#BFDBFE", "filled"),
-            "team": ("ellipse", "#67E8F9", "filled"),
+            "team": ("hexagon", "#67E8F9", "filled"),
             "project": ("box", "#86EFAC", "rounded,filled"),
-            "task": ("box", "#FDE68A", "filled"),
+            "task": ("rarrow", "#FDE68A", "filled"),
             "case": ("component", "#F9A8D4", "filled"),
             "decision": ("diamond", "#FDA4AF", "filled"),
-            "event": ("ellipse", "#C4B5FD", "filled"),
-            "person": ("box3d", "#D1D5DB", "filled"),
+            "event": ("box", "#C4B5FD", "filled"),
+            "person": ("box3d", "#FFF8E7", "filled"),
             "note": ("note", "#F5F5F4", "filled"),
             "source_item": ("tab", "#CBD5E1", "filled"),
         }
@@ -440,7 +440,7 @@ def build_mindmap_lines(records: list[KnowledgeRecord]) -> list[str]:
         if edge in edges:
             return
         edges.add(edge)
-        lines.append(f'  "{source}" -> "{target}" [label="{label}"];')
+        lines.append(f'  "{source}" -> "{target}";')
 
     for record in records:
         org_node = None
@@ -453,7 +453,7 @@ def build_mindmap_lines(records: list[KnowledgeRecord]) -> list[str]:
             add_node(org_node, f"Organization\n{record.organization}", "circle", "#BFDBFE", "filled")
         if record.team:
             team_node = f"team::{record.organization}::{record.team}"
-            add_node(team_node, f"Team\n{record.team}", "ellipse", "#67E8F9", "filled")
+            add_node(team_node, f"Team\n{record.team}", "hexagon", "#67E8F9", "filled")
             if org_node:
                 add_edge(org_node, team_node, "contains")
         if record.project:
@@ -479,7 +479,7 @@ def build_mindmap_lines(records: list[KnowledgeRecord]) -> list[str]:
         else:
             record_node = record.record_id
             record_shape, record_fill, record_style = shape_for_entity(record.entity_type)
-            add_node(record_node, f"{record.title}\n({record.entity_type})", record_shape, record_fill, record_style)
+            add_node(record_node, record.title, record_shape, record_fill, record_style)
 
         is_hierarchy_record = record.entity_type in {"organization", "team", "project", "case"}
         if not is_hierarchy_record:
@@ -521,6 +521,88 @@ def render_mindmap_svg(records: list[KnowledgeRecord]) -> str | None:
     except (OSError, subprocess.CalledProcessError):
         return None
     return result.stdout
+
+
+def render_interactive_mindmap(svg: str, height: int = 760) -> str:
+    escaped_svg = svg.replace("`", "\`")
+    return f"""
+    <div style="border:1px solid #e5e7eb;border-radius:12px;overflow:hidden;background:#fcfcfd;">
+      <div style="display:flex;justify-content:space-between;align-items:center;padding:8px 12px;border-bottom:1px solid #e5e7eb;background:#f8fafc;font-family:Helvetica,Arial,sans-serif;font-size:13px;color:#475569;">
+        <span>Zoom: egérgörgő | Mozgatás: húzás | Reset: dupla kattintás</span>
+      </div>
+      <div id="mindmap-shell" style="width:100%;height:{height}px;overflow:hidden;cursor:grab;background:white;"></div>
+    </div>
+    <script>
+    const shell = document.getElementById('mindmap-shell');
+    shell.innerHTML = `{escaped_svg}`;
+    const svg = shell.querySelector('svg');
+    if (svg) {{
+      svg.setAttribute('width', '100%');
+      svg.setAttribute('height', '100%');
+      svg.style.width = '100%';
+      svg.style.height = '100%';
+      svg.style.userSelect = 'none';
+
+      const viewBox = (svg.getAttribute('viewBox') || '').split(/\s+/).map(Number);
+      let state = {{ x: 0, y: 0, w: 100, h: 100 }};
+      if (viewBox.length === 4 && viewBox.every(v => !Number.isNaN(v))) {{
+        state = {{ x: viewBox[0], y: viewBox[1], w: viewBox[2], h: viewBox[3] }};
+      }} else {{
+        const box = svg.getBBox();
+        state = {{ x: box.x, y: box.y, w: box.width || 100, h: box.height || 100 }};
+      }}
+      const initial = {{ ...state }};
+      const setViewBox = () => svg.setAttribute('viewBox', `${{state.x}} ${{state.y}} ${{state.w}} ${{state.h}}`);
+      setViewBox();
+
+      let dragging = false;
+      let last = null;
+
+      shell.addEventListener('mousedown', (event) => {{
+        dragging = true;
+        last = {{ x: event.clientX, y: event.clientY }};
+        shell.style.cursor = 'grabbing';
+      }});
+
+      window.addEventListener('mouseup', () => {{
+        dragging = false;
+        last = null;
+        shell.style.cursor = 'grab';
+      }});
+
+      window.addEventListener('mousemove', (event) => {{
+        if (!dragging || !last) return;
+        const rect = shell.getBoundingClientRect();
+        const dx = ((event.clientX - last.x) / rect.width) * state.w;
+        const dy = ((event.clientY - last.y) / rect.height) * state.h;
+        state.x -= dx;
+        state.y -= dy;
+        last = {{ x: event.clientX, y: event.clientY }};
+        setViewBox();
+      }});
+
+      shell.addEventListener('wheel', (event) => {{
+        event.preventDefault();
+        const rect = shell.getBoundingClientRect();
+        const mx = (event.clientX - rect.left) / rect.width;
+        const my = (event.clientY - rect.top) / rect.height;
+        const scale = event.deltaY < 0 ? 0.9 : 1.1;
+        const nextW = state.w * scale;
+        const nextH = state.h * scale;
+        state.x += (state.w - nextW) * mx;
+        state.y += (state.h - nextH) * my;
+        state.w = nextW;
+        state.h = nextH;
+        setViewBox();
+      }}, {{ passive: false }});
+
+      shell.addEventListener('dblclick', () => {{
+        state = {{ ...initial }};
+        setViewBox();
+      }});
+    }}
+    </script>
+    """
 
 
 def app() -> None:
@@ -880,7 +962,7 @@ def app() -> None:
         else:
             svg = render_mindmap_svg(records)
             if svg:
-                components.html(svg, height=720, scrolling=True)
+                components.html(render_interactive_mindmap(svg), height=820, scrolling=False)
             else:
                 st.graphviz_chart("\n".join(build_mindmap_lines(records)), use_container_width=True)
             selected_id = st.selectbox(
