@@ -12,7 +12,7 @@ from rag_assistant.config import load_config
 from rag_assistant.execution_dnd_component import execution_dnd_board
 from rag_assistant.index_store import load_index, save_index
 from rag_assistant.ingest import build_index
-from rag_assistant.models import KnowledgeRecord
+from rag_assistant.models import KnowledgeRecord, utc_now_iso
 from rag_assistant.planning_layout import (
     add_block,
     add_day,
@@ -44,6 +44,12 @@ ENTITY_OPTIONS = [
     "source_item",
 ]
 NONE_OPTION = "<nincs>"
+HIERARCHY_FIELD_BY_ENTITY = {
+    "organization": "organization",
+    "team": "team",
+    "project": "project",
+    "case": "case_name",
+}
 
 
 def record_label(record: KnowledgeRecord) -> str:
@@ -54,6 +60,76 @@ def record_label(record: KnowledgeRecord) -> str:
 
 def update_record(existing: KnowledgeRecord, **changes) -> KnowledgeRecord:
     return replace(existing, **changes)
+
+
+def hierarchy_field_for_entity(entity_type: str) -> str | None:
+    return HIERARCHY_FIELD_BY_ENTITY.get(entity_type)
+
+
+def with_synced_hierarchy_title(record: KnowledgeRecord) -> KnowledgeRecord:
+    field_name = hierarchy_field_for_entity(record.entity_type)
+    if not field_name:
+        return record
+    title = record.title.strip()
+    if getattr(record, field_name) == title:
+        return record
+    return update_record(record, **{field_name: title})
+
+
+def sync_hierarchy_renames(records: list[KnowledgeRecord], previous_lookup: dict[str, KnowledgeRecord] | None = None) -> list[KnowledgeRecord]:
+    synced_lookup = {record.record_id: with_synced_hierarchy_title(record) for record in records}
+    if not previous_lookup:
+        return [synced_lookup[record.record_id] for record in records]
+
+    rename_order = ["organization", "team", "project", "case"]
+    for entity_type in rename_order:
+        for record_id, previous_record in previous_lookup.items():
+            current_record = synced_lookup.get(record_id)
+            if not current_record:
+                continue
+            if previous_record.entity_type != entity_type or current_record.entity_type != entity_type:
+                continue
+
+            field_name = hierarchy_field_for_entity(entity_type)
+            if not field_name:
+                continue
+
+            old_value = getattr(previous_record, field_name).strip() or previous_record.title.strip()
+            new_value = getattr(current_record, field_name).strip() or current_record.title.strip()
+            if not old_value or old_value == new_value:
+                continue
+
+            for other_id, other_record in list(synced_lookup.items()):
+                changes: dict[str, str] = {}
+                if entity_type == "organization":
+                    if other_record.organization == old_value:
+                        changes["organization"] = new_value
+                elif entity_type == "team":
+                    if other_record.organization == current_record.organization and other_record.team == old_value:
+                        changes["team"] = new_value
+                elif entity_type == "project":
+                    if (
+                        other_record.organization == current_record.organization
+                        and other_record.team == current_record.team
+                        and other_record.project == old_value
+                    ):
+                        changes["project"] = new_value
+                elif entity_type == "case":
+                    if (
+                        other_record.organization == current_record.organization
+                        and other_record.team == current_record.team
+                        and other_record.project == current_record.project
+                        and other_record.case_name == old_value
+                    ):
+                        changes["case_name"] = new_value
+
+                if changes:
+                    if other_id != record_id:
+                        changes["updated_at"] = utc_now_iso()
+                    synced_lookup[other_id] = update_record(other_record, **changes)
+
+    ordered_records = [synced_lookup[record.record_id] for record in records]
+    return [with_synced_hierarchy_title(record) for record in ordered_records]
 
 
 def planning_bucket_titles(layout: dict) -> dict[str, str]:
@@ -152,7 +228,7 @@ def record_from_table_row(row: dict, existing: KnowledgeRecord) -> KnowledgeReco
     event_at = normalize_table_value(row.get("event_at")) or None
     focus_rank_raw = normalize_table_value(row.get("focus_rank"))
     focus_rank = int(focus_rank_raw) if focus_rank_raw else None
-    return update_record(
+    updated = update_record(
         existing,
         title=normalize_table_value(row.get("title")) or existing.title,
         summary=normalize_table_value(row.get("summary")) if "summary" in row else existing.summary,
@@ -173,6 +249,7 @@ def record_from_table_row(row: dict, existing: KnowledgeRecord) -> KnowledgeReco
         planning_bucket=normalize_table_value(row.get("planning_bucket")),
         focus_rank=focus_rank,
     )
+    return with_synced_hierarchy_title(updated)
 
 
 def collect_existing_values(records: list[KnowledgeRecord]) -> dict[str, list[str]]:
@@ -554,12 +631,12 @@ def build_mindmap_lines(records: list[KnowledgeRecord]) -> list[str]:
             add_node(org_node, f"Organization\n{record.organization}", "circle", "#BFDBFE", "filled")
         if record.team:
             team_node = f"team::{record.organization}::{record.team}"
-            add_node(team_node, f"Team\n{record.team}", "hexagon", "#67E8F9", "filled")
+            add_node(team_node, record.team, "hexagon", "#67E8F9", "filled")
             if org_node:
                 add_edge(org_node, team_node, "contains")
         if record.project:
             project_node = f"project::{record.organization}::{record.team}::{record.project}"
-            add_node(project_node, f"Project\n{record.project}", "box", "#86EFAC", "rounded,filled")
+            add_node(project_node, record.project, "box", "#86EFAC", "rounded,filled")
             if team_node or org_node:
                 add_edge(team_node or org_node, project_node, "contains")
         if record.case_name:
@@ -999,24 +1076,54 @@ def app() -> None:
     with tab_table:
         st.subheader("Tablazat nezet")
         if records:
-            filter_col1, filter_col2, filter_col3 = st.columns(3)
-            filter_entity = filter_col1.selectbox(
+            filter_col1, filter_col2, filter_col3, filter_col4 = st.columns(4)
+            filter_title = filter_col1.text_input("Cim szures", key="table_filter_title")
+            filter_entity = filter_col2.selectbox(
                 "Szures entitasra",
                 [NONE_OPTION] + ENTITY_OPTIONS,
                 key="table_filter_entity",
             )
-            filter_status = filter_col2.selectbox(
+            filter_status = filter_col3.selectbox(
                 "Szures statuszra",
                 [NONE_OPTION] + STATUS_OPTIONS,
                 key="table_filter_status",
             )
-            filter_text = filter_col3.text_input("Szoveges szures", key="table_filter_text")
+            filter_organization = filter_col4.text_input("Organization szures", key="table_filter_organization")
+            filter_team = filter_col4.text_input("Team szures", key="table_filter_team")
+
+            filter_col5, filter_col6, filter_col7, filter_col8 = st.columns(4)
+            filter_project = filter_col5.text_input("Projekt szures", key="table_filter_project")
+            filter_case = filter_col6.text_input("Ugy szures", key="table_filter_case")
+            filter_planning_bucket = filter_col7.selectbox(
+                "Tervezesi hely szures",
+                [NONE_OPTION] + planning_options,
+                format_func=lambda value: NONE_OPTION if value == NONE_OPTION else planning_bucket_label(value, planning_titles),
+                key="table_filter_planning_bucket",
+            )
+            filter_text = filter_col8.text_input("Altalanos szoveges szures", key="table_filter_text")
 
             filtered_records = records
+            if filter_title.strip():
+                needle = filter_title.strip().lower()
+                filtered_records = [record for record in filtered_records if needle in record.title.lower()]
             if filter_entity != NONE_OPTION:
                 filtered_records = [record for record in filtered_records if record.entity_type == filter_entity]
             if filter_status != NONE_OPTION:
                 filtered_records = [record for record in filtered_records if record.status == filter_status]
+            if filter_organization.strip():
+                needle = filter_organization.strip().lower()
+                filtered_records = [record for record in filtered_records if needle in record.organization.lower()]
+            if filter_team.strip():
+                needle = filter_team.strip().lower()
+                filtered_records = [record for record in filtered_records if needle in record.team.lower()]
+            if filter_project.strip():
+                needle = filter_project.strip().lower()
+                filtered_records = [record for record in filtered_records if needle in record.project.lower()]
+            if filter_case.strip():
+                needle = filter_case.strip().lower()
+                filtered_records = [record for record in filtered_records if needle in record.case_name.lower()]
+            if filter_planning_bucket != NONE_OPTION:
+                filtered_records = [record for record in filtered_records if record.planning_bucket == filter_planning_bucket]
             if filter_text.strip():
                 needle = filter_text.strip().lower()
                 filtered_records = [
@@ -1064,10 +1171,12 @@ def app() -> None:
                                 continue
                             updated = record_from_table_row(row, existing)
                             if updated.to_dict() != existing.to_dict():
+                                updated = update_record(updated, updated_at=utc_now_iso())
                                 changed_count += 1
                             updated_lookup[record_id] = updated
 
                         merged_records = [updated_lookup.get(record.record_id, record) for record in records]
+                        merged_records = sync_hierarchy_renames(merged_records, record_lookup)
                         if changed_count == 0:
                             st.info("Nincs alkalmazando tablazatmodositas.")
                         else:
@@ -1212,6 +1321,7 @@ def app() -> None:
         if not records:
             st.info("Meg nincs megjelenitheto rekord.")
         else:
+            st.caption("Jelmagyarazat: kor kek = organization, hatszog ciankek = team, zold doboz = project, rozsaszin elem = case, sarga nyil = task, piros rombusz = decision, lila doboz = event, krem 3D doboz = person, feher jegyzet = note, szurke tab = source_item.")
             svg = render_mindmap_svg(records)
             if svg:
                 components.html(render_interactive_mindmap(svg), height=820, scrolling=False)
