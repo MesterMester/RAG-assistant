@@ -8,6 +8,7 @@ APP_DIRNAME = ".rag_assistant"
 INDEX_FILENAME = "index.json"
 MANUAL_RECORDS_FILENAME = "manual_records.json"
 CHROMA_DIRNAME = "chroma"
+PLANNING_LAYOUT_FILENAME = "planning_layout.json"
 DEFAULT_EMBED_MODEL = "nomic-embed-text"
 
 
@@ -44,6 +45,9 @@ class AppConfig:
 
     def chroma_dir_for(self, source_dir: Path) -> Path:
         return self.app_dir_for(source_dir) / CHROMA_DIRNAME
+
+    def planning_layout_path_for(self, source_dir: Path) -> Path:
+        return self.app_dir_for(source_dir) / PLANNING_LAYOUT_FILENAME
 
 
 def load_config(project_root: Path | None = None) -> AppConfig:

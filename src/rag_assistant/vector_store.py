@@ -39,6 +39,8 @@ def upsert_manual_records(records: list[KnowledgeRecord], persist_dir: Path, emb
             "case_name": record.case_name,
             "status": record.status,
             "source_type": record.source_type,
+            "start_at": record.start_at or "",
+            "due_at": record.due_at or "",
             "deadline": record.deadline or "",
             "event_at": record.event_at or "",
             "decision_needed": str(record.decision_needed).lower(),

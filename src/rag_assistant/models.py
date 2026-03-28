@@ -62,8 +62,13 @@ class KnowledgeRecord:
     decision_context: str = ""
     created_at: str = field(default_factory=utc_now_iso)
     updated_at: str = field(default_factory=utc_now_iso)
+    start_at: str | None = None
+    due_at: str | None = None
     deadline: str | None = None
     event_at: str | None = None
+    planning_bucket: str = ""
+    planning_order: int | None = None
+    focus_rank: int | None = None
 
     def to_dict(self) -> dict:
         return asdict(self)
@@ -88,8 +93,13 @@ class KnowledgeRecord:
         payload.setdefault("decision_context", "")
         payload.setdefault("created_at", utc_now_iso())
         payload.setdefault("updated_at", payload["created_at"])
-        payload.setdefault("deadline", payload.pop("due_at", None))
+        payload.setdefault("start_at", None)
+        payload.setdefault("due_at", None)
+        payload.setdefault("deadline", None)
         payload.setdefault("event_at", None)
+        payload.setdefault("planning_bucket", "")
+        payload.setdefault("planning_order", None)
+        payload.setdefault("focus_rank", None)
         return cls(**payload)
 
     def to_search_text(self) -> str:
@@ -124,7 +134,11 @@ class KnowledgeRecord:
             "people": ", ".join(self.related_people),
             "tags": ", ".join(self.tags),
             "decision_needed": self.decision_needed,
+            "start_at": self.start_at or "",
+            "due_at": self.due_at or "",
             "deadline": self.deadline or "",
             "event_at": self.event_at or "",
+            "planning_bucket": self.planning_bucket,
+            "focus_rank": self.focus_rank if self.focus_rank is not None else "",
             "updated_at": self.updated_at,
         }

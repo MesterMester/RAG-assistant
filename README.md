@@ -83,6 +83,18 @@ Kereses a keyword indexben:
 rag search "projekt hatarido"
 ```
 
+Obsidian markdown import dry-run egyetlen note-ra:
+
+```bash
+rag import-obsidian-dry-run /utvonal/a/note.md --source-dir ./dev-rag-db --vault-root /utvonal/a/vault
+```
+
+Ez meg nem ir a RAG-be, csak megmutatja:
+
+- milyen normalizalt rekordot olvasott ki a note-bol
+- milyen forras-evidence tartozik hozza
+- a jelenlegi RAG allapothoz kepest `create`, `update` vagy `attach_source` akcio lenne-e
+
 ## UI
 
 A kezdeti kezi bevitelhez es nezetekhez:

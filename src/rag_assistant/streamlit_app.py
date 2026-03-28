@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from dataclasses import replace
 from datetime import date
 import subprocess
 
@@ -8,9 +9,23 @@ import streamlit as st
 import streamlit.components.v1 as components
 
 from rag_assistant.config import load_config
+from rag_assistant.execution_dnd_component import execution_dnd_board
 from rag_assistant.index_store import load_index, save_index
 from rag_assistant.ingest import build_index
 from rag_assistant.models import KnowledgeRecord
+from rag_assistant.planning_layout import (
+    add_block,
+    add_day,
+    add_week,
+    day_for_bucket,
+    ensure_layout,
+    iter_buckets,
+    layout_rows,
+    remove_block,
+    remove_day,
+    remove_week,
+    save_planning_layout,
+)
 from rag_assistant.records import build_record_id, delete_record, load_records, normalize_records, save_records, upsert_record
 from rag_assistant.search import search_chunks
 from rag_assistant.vector_store import VectorStoreError, upsert_manual_records
@@ -35,6 +50,40 @@ def record_label(record: KnowledgeRecord) -> str:
     path_bits = [bit for bit in [record.organization, record.team, record.project, record.case_name] if bit]
     suffix = f" [{' / '.join(path_bits)}]" if path_bits else ""
     return f"{record.title} ({record.entity_type}){suffix}"
+
+
+def update_record(existing: KnowledgeRecord, **changes) -> KnowledgeRecord:
+    return replace(existing, **changes)
+
+
+def planning_bucket_titles(layout: dict) -> dict[str, str]:
+    titles = {"": "Nincs utemezve"}
+    for bucket in iter_buckets(layout):
+        week_title = bucket.get("week_title", "").strip()
+        day_title = bucket.get("day_title", "").strip()
+        bucket_title = bucket.get("title", "").strip()
+        titles[bucket.get("key", "")] = " / ".join(part for part in [week_title, day_title, bucket_title] if part)
+    return titles
+
+
+def planning_bucket_options(layout: dict, extra_values: list[str] | None = None) -> list[str]:
+    options = [""]
+    options.extend(bucket.get("key", "") for bucket in iter_buckets(layout) if bucket.get("key"))
+    for value in extra_values or []:
+        if value and value not in options:
+            options.append(value)
+    return options
+
+
+def planning_bucket_label(value: str, titles: dict[str, str] | None = None) -> str:
+    title_map = titles or {"": "Nincs utemezve"}
+    return title_map.get(value or "", value or "Nincs utemezve")
+
+
+def persist_planning_layout(layout: dict, layout_path) -> None:
+    save_planning_layout(layout_path, layout)
+    st.success("Planning layout mentve.")
+    st.rerun()
 
 
 def get_selected_record(records: list[KnowledgeRecord]) -> KnowledgeRecord | None:
@@ -97,14 +146,16 @@ def persist_records_bulk(records: list[KnowledgeRecord], source_dir, config, rec
 
 
 def record_from_table_row(row: dict, existing: KnowledgeRecord) -> KnowledgeRecord:
+    start_at = normalize_table_value(row.get("start_at")) or None
+    due_at = normalize_table_value(row.get("due_at")) or None
     deadline = normalize_table_value(row.get("deadline")) or None
     event_at = normalize_table_value(row.get("event_at")) or None
-    return KnowledgeRecord(
-        record_id=existing.record_id,
+    focus_rank_raw = normalize_table_value(row.get("focus_rank"))
+    focus_rank = int(focus_rank_raw) if focus_rank_raw else None
+    return update_record(
+        existing,
         title=normalize_table_value(row.get("title")) or existing.title,
         summary=normalize_table_value(row.get("summary")) if "summary" in row else existing.summary,
-        content=existing.content,
-        source_type=existing.source_type,
         entity_type=normalize_table_value(row.get("entity_type")) or existing.entity_type,
         status=normalize_table_value(row.get("status")) or existing.status,
         organization=normalize_table_value(row.get("organization")),
@@ -114,12 +165,13 @@ def record_from_table_row(row: dict, existing: KnowledgeRecord) -> KnowledgeReco
         parent_id=normalize_table_value(row.get("parent_id")),
         related_people=parse_csv_list(normalize_table_value(row.get("people"))),
         tags=parse_csv_list(normalize_table_value(row.get("tags"))),
-        relations=list(existing.relations),
         decision_needed=bool(row.get("decision_needed")),
-        decision_context=existing.decision_context,
-        created_at=existing.created_at,
+        start_at=start_at,
+        due_at=due_at,
         deadline=deadline,
         event_at=event_at,
+        planning_bucket=normalize_table_value(row.get("planning_bucket")),
+        focus_rank=focus_rank,
     )
 
 
@@ -243,7 +295,14 @@ def render_relations_selector(records: list[KnowledgeRecord], default_values: li
     return selected + extras
 
 
-def render_record_editor(key_prefix: str, records: list[KnowledgeRecord], existing_values: dict[str, list[str]], base_record: KnowledgeRecord | None = None) -> dict:
+def render_record_editor(
+    key_prefix: str,
+    records: list[KnowledgeRecord],
+    existing_values: dict[str, list[str]],
+    planning_options: list[str],
+    planning_titles: dict[str, str],
+    base_record: KnowledgeRecord | None = None,
+) -> dict:
     record = base_record or KnowledgeRecord(
         record_id="",
         title="",
@@ -266,9 +325,10 @@ def render_record_editor(key_prefix: str, records: list[KnowledgeRecord], existi
     show_status = entity_type not in {"organization", "team", "person"}
     show_people = entity_type in {"organization", "team", "project", "case", "task", "event", "note", "source_item", "decision"}
     show_parent = entity_type not in {"organization"}
-    show_deadline = entity_type in {"task", "case", "project", "decision", "note", "source_item"}
+    show_schedule = entity_type in {"task", "case", "project", "decision", "note", "source_item"}
     show_event = entity_type == "event"
     show_decision = entity_type in {"project", "case", "task", "decision", "note", "source_item"}
+    show_planning = entity_type in {"task", "case", "project", "decision", "note", "source_item", "event"}
 
     parent_status_people = st.columns(3)
     if show_parent:
@@ -347,21 +407,27 @@ def render_record_editor(key_prefix: str, records: list[KnowledgeRecord], existi
     with relation_col:
         relations = render_relations_selector(records, record.relations, key_prefix)
 
-    date_col1, date_col2, date_col3 = st.columns(3)
-    if show_deadline:
-        deadline = date_col1.date_input("Deadline", value=parse_optional_date(record.deadline), key=f"{key_prefix}_deadline")
+    date_col1, date_col2, date_col3, date_col4 = st.columns(4)
+    if show_schedule:
+        start_at = date_col1.date_input("Start date", value=parse_optional_date(record.start_at), key=f"{key_prefix}_start_at")
+        due_at = date_col2.date_input("Due date", value=parse_optional_date(record.due_at), key=f"{key_prefix}_due_at")
+        deadline = date_col3.date_input("Deadline", value=parse_optional_date(record.deadline), key=f"{key_prefix}_deadline")
     else:
-        date_col1.caption("Deadline: nem relevans ehhez az entitashoz")
+        date_col1.caption("Start date: nem relevans ehhez az entitashoz")
+        date_col2.caption("Due date: nem relevans ehhez az entitashoz")
+        date_col3.caption("Deadline: nem relevans ehhez az entitashoz")
+        start_at = None
+        due_at = None
         deadline = None
 
     if show_event:
-        event_at = date_col2.date_input("Esemeny datuma", value=parse_optional_date(record.event_at), key=f"{key_prefix}_event_at")
+        event_at = date_col4.date_input("Esemeny datuma", value=parse_optional_date(record.event_at), key=f"{key_prefix}_event_at")
     else:
-        date_col2.caption("Esemeny datuma: csak Event entitasnal relevans")
+        date_col4.caption("Esemeny datuma: csak Event entitasnal relevans")
         event_at = None
 
     if show_decision:
-        decision_needed = date_col3.checkbox("Dontest igenyel", value=record.decision_needed, key=f"{key_prefix}_decision_needed")
+        decision_needed = st.checkbox("Dontest igenyel", value=record.decision_needed, key=f"{key_prefix}_decision_needed")
         decision_context = st.text_input(
             "Dontesi kontextus",
             value=record.decision_context,
@@ -369,9 +435,40 @@ def render_record_editor(key_prefix: str, records: list[KnowledgeRecord], existi
             key=f"{key_prefix}_decision_context",
         )
     else:
-        date_col3.caption("Dontesi mezok: nem relevans ehhez az entitashoz")
+        st.caption("Dontesi mezok: nem relevans ehhez az entitashoz")
         decision_needed = False
         decision_context = ""
+
+    planning_col1, planning_col2 = st.columns(2)
+    if show_planning:
+        planning_choices = list(planning_options)
+        if record.planning_bucket and record.planning_bucket not in planning_choices:
+            planning_choices.append(record.planning_bucket)
+        planning_bucket = planning_col1.selectbox(
+            "Tervezesi hely",
+            planning_choices,
+            index=planning_choices.index(record.planning_bucket) if record.planning_bucket in planning_choices else 0,
+            format_func=lambda value: planning_bucket_label(value, planning_titles),
+            key=f"{key_prefix}_planning_bucket",
+        )
+        focus_rank = planning_col2.number_input(
+            "Fokusz sorrend",
+            min_value=1,
+            step=1,
+            value=record.focus_rank or 1,
+            key=f"{key_prefix}_focus_rank",
+        )
+        focus_rank_enabled = planning_bucket == "main_focus"
+        if not focus_rank_enabled:
+            planning_col2.caption("A fokusz sorrend csak a Fo fokusz bucketnel relevans.")
+            focus_rank_value = None
+        else:
+            focus_rank_value = int(focus_rank)
+    else:
+        planning_col1.caption("Tervezesi mezok: nem relevans ehhez az entitashoz")
+        planning_col2.caption("Fokusz sorrend: nem relevans ehhez az entitashoz")
+        planning_bucket = ""
+        focus_rank_value = None
 
     return {
         "title": title.strip(),
@@ -389,8 +486,12 @@ def render_record_editor(key_prefix: str, records: list[KnowledgeRecord], existi
         "relations": relations,
         "decision_needed": decision_needed,
         "decision_context": decision_context.strip(),
+        "start_at": start_at.isoformat() if isinstance(start_at, date) else None,
+        "due_at": due_at.isoformat() if isinstance(due_at, date) else None,
         "deadline": deadline.isoformat() if isinstance(deadline, date) else None,
         "event_at": event_at.isoformat() if isinstance(event_at, date) else None,
+        "planning_bucket": planning_bucket,
+        "focus_rank": focus_rank_value,
     }
 
 
@@ -605,6 +706,166 @@ def render_interactive_mindmap(svg: str, height: int = 760) -> str:
     """
 
 
+def render_execution_layout_manager(layout: dict, layout_path) -> None:
+    with st.expander("Planning blokkok szerkesztese", expanded=False):
+        st.caption("A planning szerkezet itt attekintheto tablazatban. Uj hetek, napok es blokkok `+` jelleggel vehetoek fel, a session-jellegu blokkok torolhetoek is.")
+
+        rows = layout_rows(layout)
+        if rows:
+            st.dataframe(pd.DataFrame(rows), use_container_width=True, hide_index=True)
+
+        week_col1, week_col2, week_col3 = st.columns([1, 1, 1])
+        new_week_start = week_col1.date_input("Uj het kezdete", key="planning_new_week_start")
+        new_week_title = week_col2.text_input("Het cimke", key="planning_new_week_title", placeholder="opcionalis")
+        if week_col3.button("+ Het", key="planning_add_week"):
+            persist_planning_layout(add_week(layout, new_week_start.isoformat(), new_week_title.strip() or None), layout_path)
+
+        weeks = layout.get("weeks", [])
+        if weeks:
+            day_col1, day_col2, day_col3, day_col4 = st.columns([1, 1, 1, 1])
+            target_week = day_col1.selectbox(
+                "Cel het",
+                options=[week.get("key", "") for week in weeks],
+                format_func=lambda key: next(week.get("title", key) for week in weeks if week.get("key") == key),
+                key="planning_target_week",
+            )
+            new_day_date = day_col2.date_input("Uj nap datuma", key="planning_new_day_date")
+            new_day_title = day_col3.text_input("Nap neve", key="planning_new_day_title", placeholder="opcionalis")
+            if day_col4.button("+ Nap", key="planning_add_day"):
+                persist_planning_layout(add_day(layout, target_week, new_day_date.isoformat(), new_day_title.strip() or None), layout_path)
+
+        all_days = [(week.get("title", ""), day.get("key", ""), day.get("title", ""), day.get("date", "")) for week in weeks for day in week.get("days", [])]
+        if all_days:
+            block_col1, block_col2, block_col3 = st.columns([2, 2, 1])
+            target_day = block_col1.selectbox(
+                "Cel nap",
+                options=[day_key for _, day_key, _, _ in all_days],
+                format_func=lambda key: next(f"{week_title} / {day_title} ({day_date or '-'})" for week_title, day_key, day_title, day_date in all_days if day_key == key),
+                key="planning_target_day",
+            )
+            new_block_title = block_col2.text_input("Uj blokk neve", key="planning_new_block_title", placeholder="pl. XY meeting vagy esti blokk")
+            if block_col3.button("+ Blokk", key="planning_add_block"):
+                if not new_block_title.strip():
+                    st.warning("Adj nevet az uj blokknak.")
+                else:
+                    persist_planning_layout(add_block(layout, target_day, new_block_title.strip(), "session"), layout_path)
+
+        remove_col1, remove_col2, remove_col3 = st.columns(3)
+        if weeks:
+            removable_week = remove_col1.selectbox(
+                "Torolheto het",
+                options=[""] + [week.get("key", "") for week in weeks],
+                format_func=lambda key: "" if not key else next(week.get("title", key) for week in weeks if week.get("key") == key),
+                key="planning_remove_week",
+            )
+            if removable_week and remove_col1.button("Het torlese", key="planning_remove_week_button"):
+                persist_planning_layout(remove_week(layout, removable_week), layout_path)
+        if all_days:
+            removable_day = remove_col2.selectbox(
+                "Torolheto nap",
+                options=[""] + [day_key for _, day_key, _, _ in all_days],
+                format_func=lambda key: "" if not key else next(f"{week_title} / {day_title}" for week_title, day_key, day_title, _ in all_days if day_key == key),
+                key="planning_remove_day",
+            )
+            if removable_day and remove_col2.button("Nap torlese", key="planning_remove_day_button"):
+                persist_planning_layout(remove_day(layout, removable_day), layout_path)
+        removable_blocks = [bucket for bucket in iter_buckets(layout) if bucket.get("lane") == "session"]
+        if removable_blocks:
+            removable_block = remove_col3.selectbox(
+                "Torolheto blokk",
+                options=[""] + [bucket.get("key", "") for bucket in removable_blocks],
+                format_func=lambda key: "" if not key else next(
+                    f"{bucket.get('week_title', '')} / {bucket.get('day_title', '')} / {bucket.get('title', key)}"
+                    for bucket in removable_blocks
+                    if bucket.get("key") == key
+                ),
+                key="planning_remove_block",
+            )
+            if removable_block and remove_col3.button("Blokk torlese", key="planning_remove_block_button"):
+                persist_planning_layout(remove_block(layout, removable_block), layout_path)
+
+
+def render_execution_graph(records: list[KnowledgeRecord], layout: dict, layout_path, source_dir, config, records_path, index_path, chroma_dir) -> None:
+    st.subheader("Execution Graph")
+    st.caption("Vizualis, drag-and-drop planning felulet het -> nap -> blokk szerkezettel. A blokkhoz tartozo nap datuma a task `due` mezojevel kerul osszhangba, a `deadline` ettol fuggetlen marad.")
+    render_execution_layout_manager(layout, layout_path)
+
+    task_records = [record for record in records if record.entity_type == "task"]
+    if not task_records:
+        st.info("Meg nincs task rekord az execution graphhoz.")
+        return
+
+    component_payload = {
+        "weeks": layout.get("weeks", []),
+        "tasks": [
+            {
+                "record_id": record.record_id,
+                "title": record.title,
+                "project": record.project,
+                "case_name": record.case_name,
+                "planning_bucket": record.planning_bucket,
+                "focus_rank": record.focus_rank,
+            }
+            for record in task_records
+        ],
+    }
+
+    drag_result = execution_dnd_board(component_payload, key="execution_dnd_surface")
+    if isinstance(drag_result, dict) and drag_result.get("action") == "move_task":
+        event_id = str(drag_result.get("event_id", "")).strip()
+        if event_id and st.session_state.get("last_execution_drag_event") == event_id:
+            drag_result = None
+        elif event_id:
+            st.session_state["last_execution_drag_event"] = event_id
+    if isinstance(drag_result, dict) and drag_result.get("action") == "move_task":
+        record_id = str(drag_result.get("record_id", "")).strip()
+        planning_bucket = str(drag_result.get("planning_bucket", "")).strip()
+        dragged_record = next((record for record in task_records if record.record_id == record_id), None)
+        if dragged_record and planning_bucket and planning_bucket != dragged_record.planning_bucket:
+            bucket_info = day_for_bucket(layout, planning_bucket)
+            next_due = bucket_info.get("day_date") if bucket_info else dragged_record.due_at
+            persist_record(
+                update_record(
+                    dragged_record,
+                    planning_bucket=planning_bucket,
+                    due_at=next_due,
+                    focus_rank=None,
+                ),
+                source_dir,
+                config,
+                records_path,
+                index_path,
+                chroma_dir,
+            )
+
+    unscheduled_tasks = [record for record in task_records if not record.planning_bucket]
+    if unscheduled_tasks:
+        st.markdown("**Idopont nelkul**")
+        rows = [
+            {
+                "title": record.title,
+                "project": record.project,
+                "case": record.case_name,
+                "status": record.status,
+                "due_at": record.due_at or "",
+                "deadline": record.deadline or "",
+            }
+            for record in unscheduled_tasks
+        ]
+        st.dataframe(pd.DataFrame(rows), use_container_width=True, hide_index=True)
+        for record in unscheduled_tasks:
+            if st.button(f"Megnyit: {record.title}", key=f"open_unscheduled_{record.record_id}"):
+                st.session_state["selected_record_id"] = record.record_id
+                st.rerun()
+
+    known_bucket_keys = {bucket.get("key", "") for bucket in iter_buckets(layout)}
+    orphan_tasks = [record for record in task_records if record.planning_bucket and record.planning_bucket not in known_bucket_keys]
+    if orphan_tasks:
+        st.warning("Van olyan task, ami mar nem letezo bucketbe mutat. Ezeket erdemes ujra elhelyezni.")
+        for record in orphan_tasks:
+            st.write(f"{record.title} -> {record.planning_bucket}")
+
+
 def app() -> None:
     config = load_config()
     st.set_page_config(page_title="RAG asszisztens", layout="wide")
@@ -619,30 +880,35 @@ def app() -> None:
     records_path = config.manual_records_path_for(source_dir)
     index_path = config.index_path_for(source_dir)
     chroma_dir = config.chroma_dir_for(source_dir)
+    planning_layout_path = config.planning_layout_path_for(source_dir)
     records = load_records(records_path)
+    planning_layout = ensure_layout(planning_layout_path)
+    planning_titles = planning_bucket_titles(planning_layout)
     records, normalized_count = normalize_records(records)
     if normalized_count:
         save_records(records_path, records)
     existing_values = collect_existing_values(records)
     selected_record = get_selected_record(records)
+    planning_options = planning_bucket_options(planning_layout, [record.planning_bucket for record in records])
 
     st.sidebar.subheader("Privat tarak")
     st.sidebar.write(f"RAG-DB: `{source_dir}`")
     st.sidebar.write(f"Manual records: `{records_path}`")
     st.sidebar.write(f"Keyword index: `{index_path}`")
     st.sidebar.write(f"Chroma: `{chroma_dir}`")
+    st.sidebar.write(f"Planning layout: `{planning_layout_path}`")
     if selected_record:
         st.sidebar.subheader("Kivalasztott rekord")
         st.sidebar.write(record_label(selected_record))
         st.sidebar.caption(selected_record.record_id)
 
-    tab_input, tab_detail, tab_table, tab_kanban, tab_timeline, tab_mindmap, tab_search = st.tabs(
-        ["Bevitel", "Reszlet", "Tablazat", "Kanban", "Timeline", "Mindmap", "Kereses"]
+    tab_input, tab_detail, tab_table, tab_kanban, tab_timeline, tab_execution, tab_mindmap, tab_search = st.tabs(
+        ["Bevitel", "Reszlet", "Tablazat", "Kanban", "Timeline", "Execution Graph", "Context Graph", "Kereses"]
     )
 
     with tab_input:
         st.subheader("Kezi upsert")
-        create_values = render_record_editor("create", records, existing_values)
+        create_values = render_record_editor("create", records, existing_values, planning_options, planning_titles)
         if st.button("Mentes es upsert", key="create_save"):
             if not create_values["title"]:
                 st.error("A cim kotelezo.")
@@ -665,8 +931,12 @@ def app() -> None:
                     relations=create_values["relations"],
                     decision_needed=create_values["decision_needed"],
                     decision_context=create_values["decision_context"],
+                    start_at=create_values["start_at"],
+                    due_at=create_values["due_at"],
                     deadline=create_values["deadline"],
                     event_at=create_values["event_at"],
+                    planning_bucket=create_values["planning_bucket"],
+                    focus_rank=create_values["focus_rank"],
                 )
                 persist_record(record, source_dir, config, records_path, index_path, chroma_dir)
 
@@ -691,14 +961,20 @@ def app() -> None:
             st.write(f"Letrehozva: {selected_record.created_at}")
             st.write(f"Utoljara frissitve: {selected_record.updated_at}")
 
-            edit_values = render_record_editor(f"edit_{selected_record.record_id}", records, existing_values, selected_record)
+            edit_values = render_record_editor(
+                f"edit_{selected_record.record_id}",
+                records,
+                existing_values,
+                planning_options,
+                planning_titles,
+                selected_record,
+            )
             if st.button("Modositas mentese", key="edit_save"):
-                updated_record = KnowledgeRecord(
-                    record_id=selected_record.record_id,
+                updated_record = update_record(
+                    selected_record,
                     title=edit_values["title"],
                     summary=edit_values["summary"],
                     content=edit_values["content"],
-                    source_type=selected_record.source_type,
                     entity_type=edit_values["entity_type"],
                     status=edit_values["status"],
                     organization=edit_values["organization"],
@@ -711,9 +987,12 @@ def app() -> None:
                     relations=edit_values["relations"],
                     decision_needed=edit_values["decision_needed"],
                     decision_context=edit_values["decision_context"],
-                    created_at=selected_record.created_at,
+                    start_at=edit_values["start_at"],
+                    due_at=edit_values["due_at"],
                     deadline=edit_values["deadline"],
                     event_at=edit_values["event_at"],
+                    planning_bucket=edit_values["planning_bucket"],
+                    focus_rank=edit_values["focus_rank"],
                 )
                 persist_record(updated_record, source_dir, config, records_path, index_path, chroma_dir)
 
@@ -765,6 +1044,7 @@ def app() -> None:
                         "entity_type": st.column_config.SelectboxColumn("entitas", options=ENTITY_OPTIONS, required=True),
                         "status": st.column_config.SelectboxColumn("statusz", options=STATUS_OPTIONS, required=True),
                         "decision_needed": st.column_config.CheckboxColumn("dontes?"),
+                        "planning_bucket": st.column_config.SelectboxColumn("tervezesi hely", options=planning_options),
                         "record_id": st.column_config.TextColumn("record_id", disabled=True),
                         "updated_at": st.column_config.TextColumn("updated_at", disabled=True),
                     },
@@ -867,28 +1147,7 @@ def app() -> None:
                     action_col1, action_col2 = st.columns(2)
                     with action_col1:
                         if st.button("Statusz mentese", key=f"save_kanban_{record.record_id}"):
-                            updated_record = KnowledgeRecord(
-                                record_id=record.record_id,
-                                title=record.title,
-                                summary=record.summary,
-                                content=record.content,
-                                source_type=record.source_type,
-                                entity_type=record.entity_type,
-                                status=new_status,
-                                organization=record.organization,
-                                team=record.team,
-                                project=record.project,
-                                case_name=record.case_name,
-                                parent_id=record.parent_id,
-                                related_people=list(record.related_people),
-                                tags=list(record.tags),
-                                relations=list(record.relations),
-                                decision_needed=record.decision_needed,
-                                decision_context=record.decision_context,
-                                created_at=record.created_at,
-                                deadline=record.deadline,
-                                event_at=record.event_at,
-                            )
+                            updated_record = update_record(record, status=new_status)
                             persist_record(updated_record, source_dir, config, records_path, index_path, chroma_dir)
                     with action_col2:
                         if st.button("Megnyit", key=f"open_kanban_{record.record_id}"):
@@ -898,14 +1157,14 @@ def app() -> None:
 
     with tab_timeline:
         st.subheader("Timeline nezet")
-        st.caption("Itt helyben modosithatod a deadline-t vagy event datumot.")
-        items = [record for record in records if record.deadline or record.event_at]
-        items.sort(key=lambda item: item.event_at or item.deadline or "9999-99-99")
+        st.caption("Itt helyben modosithatod a due, deadline vagy event datumot.")
+        items = [record for record in records if record.due_at or record.deadline or record.event_at]
+        items.sort(key=lambda item: item.event_at or item.due_at or item.deadline or "9999-99-99")
         if not items:
             st.info("Meg nincs datumhoz kotott rekord.")
         for record in items:
-            when = record.event_at or record.deadline or ""
-            label = "event" if record.event_at else "deadline"
+            when = record.event_at or record.due_at or record.deadline or ""
+            label = "event" if record.event_at else ("due" if record.due_at else "deadline")
             st.markdown(f"**{when}** [{label}] {record.title}")
             st.caption(f"{record.entity_type} | {record.organization} / {record.team} / {record.project} / {record.case_name}")
             if record.summary:
@@ -919,6 +1178,12 @@ def app() -> None:
                         value=parse_optional_date(record.event_at),
                         key=f"timeline_event_{record.record_id}",
                     )
+                elif record.due_at:
+                    new_date = st.date_input(
+                        "Uj due date",
+                        value=parse_optional_date(record.due_at),
+                        key=f"timeline_due_{record.record_id}",
+                    )
                 else:
                     new_date = st.date_input(
                         "Uj deadline",
@@ -927,26 +1192,10 @@ def app() -> None:
                     )
             with edit_col2:
                 if st.button("Datum mentese", key=f"save_timeline_{record.record_id}"):
-                    updated_record = KnowledgeRecord(
-                        record_id=record.record_id,
-                        title=record.title,
-                        summary=record.summary,
-                        content=record.content,
-                        source_type=record.source_type,
-                        entity_type=record.entity_type,
-                        status=record.status,
-                        organization=record.organization,
-                        team=record.team,
-                        project=record.project,
-                        case_name=record.case_name,
-                        parent_id=record.parent_id,
-                        related_people=list(record.related_people),
-                        tags=list(record.tags),
-                        relations=list(record.relations),
-                        decision_needed=record.decision_needed,
-                        decision_context=record.decision_context,
-                        created_at=record.created_at,
-                        deadline=None if record.event_at else (new_date.isoformat() if isinstance(new_date, date) else None),
+                    updated_record = update_record(
+                        record,
+                        due_at=(new_date.isoformat() if isinstance(new_date, date) else None) if record.due_at and not record.event_at else record.due_at,
+                        deadline=(new_date.isoformat() if isinstance(new_date, date) else None) if record.deadline and not record.due_at and not record.event_at else record.deadline,
                         event_at=(new_date.isoformat() if isinstance(new_date, date) else None) if record.event_at else None,
                     )
                     persist_record(updated_record, source_dir, config, records_path, index_path, chroma_dir)
@@ -955,8 +1204,11 @@ def app() -> None:
                     st.rerun()
             st.divider()
 
+    with tab_execution:
+        render_execution_graph(records, planning_layout, planning_layout_path, source_dir, config, records_path, index_path, chroma_dir)
+
     with tab_mindmap:
-        st.subheader("Mindmap nezet")
+        st.subheader("Context Graph")
         if not records:
             st.info("Meg nincs megjelenitheto rekord.")
         else:
@@ -979,37 +1231,46 @@ def app() -> None:
             with edit_col2:
                 new_relations = render_relations_selector(records, selected_record_mindmap.relations, "mindmap")
 
-            button_col1, button_col2 = st.columns(2)
+            planning_col1, planning_col2 = st.columns(2)
+            with planning_col1:
+                moved_bucket = st.selectbox(
+                    "Athelyezes az execution graphban",
+                    planning_options,
+                    index=planning_options.index(selected_record_mindmap.planning_bucket) if selected_record_mindmap.planning_bucket in planning_options else 0,
+                    format_func=lambda value: planning_bucket_label(value, planning_titles),
+                    key="mindmap_planning_bucket",
+                )
+            with planning_col2:
+                moved_focus_rank = st.number_input(
+                    "Fo fokusz sorrend",
+                    min_value=1,
+                    step=1,
+                    value=selected_record_mindmap.focus_rank or 1,
+                    key="mindmap_focus_rank",
+                )
+
+            button_col1, button_col2, button_col3 = st.columns(3)
             with button_col1:
                 if st.button("Kapcsolatok mentese", key="save_from_mindmap"):
-                    updated_record = KnowledgeRecord(
-                        record_id=selected_record_mindmap.record_id,
-                        title=selected_record_mindmap.title,
-                        summary=selected_record_mindmap.summary,
-                        content=selected_record_mindmap.content,
-                        source_type=selected_record_mindmap.source_type,
-                        entity_type=selected_record_mindmap.entity_type,
-                        status=selected_record_mindmap.status,
-                        organization=selected_record_mindmap.organization,
-                        team=selected_record_mindmap.team,
-                        project=selected_record_mindmap.project,
-                        case_name=selected_record_mindmap.case_name,
+                    updated_record = update_record(
+                        selected_record_mindmap,
                         parent_id=new_parent,
-                        related_people=list(selected_record_mindmap.related_people),
-                        tags=list(selected_record_mindmap.tags),
                         relations=list(new_relations),
-                        decision_needed=selected_record_mindmap.decision_needed,
-                        decision_context=selected_record_mindmap.decision_context,
-                        created_at=selected_record_mindmap.created_at,
-                        deadline=selected_record_mindmap.deadline,
-                        event_at=selected_record_mindmap.event_at,
                     )
                     persist_record(updated_record, source_dir, config, records_path, index_path, chroma_dir)
             with button_col2:
+                if st.button("Athelyezes mentese", key="move_from_mindmap"):
+                    updated_record = update_record(
+                        selected_record_mindmap,
+                        planning_bucket=moved_bucket,
+                        focus_rank=int(moved_focus_rank) if moved_bucket == "main_focus" else None,
+                    )
+                    persist_record(updated_record, source_dir, config, records_path, index_path, chroma_dir)
+            with button_col3:
                 if st.button("Megnyit a reszletnezetben", key="open_from_mindmap"):
                     st.session_state["selected_record_id"] = selected_id
                     st.rerun()
-            st.caption("A graf a szervezeti hierarchiat, a primary parent kapcsolatot es a tovabbi relaciokat is megjeleniti.")
+            st.caption("A graf a szervezeti hierarchiat, a primary parent kapcsolatot es a tovabbi relaciokat is megjeleniti. A bucket-athelyezes itt most stabil, mentett muveletkent erheto el; a teljes vasznon beluli drag-and-drop egy kovetkezo lepeshez kulon Streamlit komponens lenne az idealis irany.")
 
     with tab_search:
         st.subheader("Kereses")

@@ -23,3 +23,16 @@ Planned next steps:
 - cloud AI conversation capture as a new source type
 - richer metadata and entity relations
 - retrieval orchestration over keyword and vector results
+- split graph views into `Context Graph` and `Execution Graph`
+
+Importer and upserter separation:
+
+- importers are source-specific adapters that generate normalized proposed changes
+- the upserter is the shared ingestion component that applies those changes into the `RAG-DB`
+- the upserter preserves source provenance, so one record may later be supported by multiple origins
+
+See:
+
+- `docs/importer-upserter.md`
+- `docs/graph-views.md`
+- `docs/phase-1-implementation-plan.md`

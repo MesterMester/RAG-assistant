@@ -67,6 +67,7 @@ def normalize_records(records: list[KnowledgeRecord]) -> tuple[list[KnowledgeRec
         record.project = resolve_reference(record.project, "project")
         record.case_name = resolve_reference(record.case_name, "case")
         record.parent_id = (record.parent_id or "").strip()
+        record.planning_bucket = (record.planning_bucket or "").strip()
 
         if record.entity_type == "organization" and not record.organization:
             record.organization = record.title

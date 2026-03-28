@@ -80,6 +80,9 @@ Core fields:
 - `updated_at`
 - `deadline`
 - `event_at`
+- `planning_bucket`
+- `planning_order`
+- `focus_rank`
 
 ## Entity Types
 
@@ -253,6 +256,32 @@ Best for:
 Direct manipulation idea:
 
 - node movement and link editing change hierarchy or relations
+
+### Context Graph
+
+Best for:
+
+- logical structure
+- relation editing
+- case and project understanding
+
+Direct manipulation idea:
+
+- node movement changes hierarchy
+- link editing changes context relations
+
+### Execution Graph
+
+Best for:
+
+- planning work blocks
+- moving unfinished tasks
+- weekly and near-term scheduling
+- keeping a compact current focus area
+
+Direct manipulation idea:
+
+- moving a task between planning buckets changes `planning_bucket`
 
 ## Immediate Modeling Rule
 

@@ -1,0 +1,323 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>Execution DnD Board</title>
+    <style>
+      :root {
+        color-scheme: light;
+        --bg: #fffdf8;
+        --panel: #ffffff;
+        --text: #0f172a;
+        --muted: #64748b;
+        --line: #e2e8f0;
+        --shadow: 0 10px 30px rgba(15, 23, 42, 0.08);
+      }
+      * { box-sizing: border-box; }
+      body {
+        margin: 0;
+        padding: 12px;
+        background:
+          radial-gradient(circle at top left, rgba(251, 191, 36, 0.14), transparent 28%),
+          radial-gradient(circle at top right, rgba(59, 130, 246, 0.12), transparent 26%),
+          linear-gradient(180deg, #fffefb 0%, #f8fafc 100%);
+        color: var(--text);
+        font-family: Georgia, "Times New Roman", serif;
+      }
+      #app {
+        display: flex;
+        flex-direction: column;
+        gap: 18px;
+      }
+      .top-note {
+        display: flex;
+        justify-content: space-between;
+        align-items: center;
+        gap: 12px;
+        padding: 10px 14px;
+        border: 1px solid var(--line);
+        border-radius: 18px;
+        background: rgba(255,255,255,0.85);
+        box-shadow: var(--shadow);
+        font-size: 13px;
+      }
+      .board {
+        display: flex;
+        flex-direction: column;
+        gap: 18px;
+      }
+      .week {
+        padding: 14px;
+        border-radius: 24px;
+        border: 1px solid var(--line);
+        background: linear-gradient(135deg, rgba(255,250,240,0.95), rgba(238,242,255,0.95));
+        box-shadow: var(--shadow);
+      }
+      .week-header {
+        margin-bottom: 12px;
+      }
+      .week-title {
+        font-size: 22px;
+        font-weight: 700;
+      }
+      .week-meta {
+        font-size: 11px;
+        letter-spacing: 0.08em;
+        text-transform: uppercase;
+        color: var(--muted);
+        margin-top: 2px;
+      }
+      .days {
+        display: flex;
+        flex-direction: column;
+        gap: 14px;
+      }
+      .day {
+        padding: 12px;
+        border-radius: 18px;
+        background: rgba(255,255,255,0.55);
+        border: 1px solid rgba(148, 163, 184, 0.28);
+      }
+      .day-header {
+        margin-bottom: 10px;
+      }
+      .day-title {
+        font-size: 18px;
+        font-weight: 700;
+      }
+      .day-date {
+        font-size: 12px;
+        color: var(--muted);
+      }
+      .blocks {
+        display: grid;
+        grid-template-columns: repeat(auto-fit, minmax(260px, 1fr));
+        gap: 12px;
+      }
+      .bucket {
+        border-radius: 20px;
+        padding: 12px;
+        min-height: 160px;
+        border: 1px solid var(--bucket-accent, var(--line));
+        background: var(--bucket-bg, #fff);
+        transition: transform 120ms ease, box-shadow 120ms ease, border-color 120ms ease;
+      }
+      .bucket.drag-over {
+        transform: translateY(-2px);
+        box-shadow: 0 14px 26px rgba(15, 23, 42, 0.12);
+        border-color: #0f172a;
+      }
+      .bucket-header {
+        margin-bottom: 10px;
+      }
+      .bucket-title {
+        font-size: 13px;
+        font-weight: 700;
+        letter-spacing: 0.04em;
+        text-transform: uppercase;
+        color: var(--bucket-accent, #334155);
+      }
+      .bucket-subtitle {
+        font-size: 12px;
+        color: var(--muted);
+      }
+      .task-list {
+        display: flex;
+        flex-direction: column;
+        gap: 8px;
+      }
+      .task {
+        border-radius: 16px;
+        border-left: 4px solid var(--bucket-accent, #334155);
+        background: rgba(255,255,255,0.92);
+        box-shadow: 0 5px 14px rgba(15, 23, 42, 0.08);
+        padding: 10px 12px;
+        cursor: grab;
+      }
+      .task.dragging {
+        opacity: 0.45;
+      }
+      .task-title {
+        font-weight: 700;
+        font-size: 14px;
+        margin-bottom: 2px;
+      }
+      .task-meta {
+        font-size: 12px;
+        color: var(--muted);
+      }
+      .empty {
+        color: var(--muted);
+        font-size: 12px;
+        padding: 12px 8px;
+        border: 1px dashed rgba(100, 116, 139, 0.35);
+        border-radius: 14px;
+        background: rgba(255,255,255,0.5);
+      }
+    </style>
+  </head>
+  <body>
+    <div id="app"></div>
+    <script>
+      const laneStyles = {
+        focus: { bg: "#fff7ed", accent: "#ea580c" },
+        must: { bg: "#fef2f2", accent: "#dc2626" },
+        prefer: { bg: "#eff6ff", accent: "#2563eb" },
+        session: { bg: "#f5f3ff", accent: "#7c3aed" },
+        later: { bg: "#f0fdf4", accent: "#16a34a" },
+        parking: { bg: "#f8fafc", accent: "#475569" },
+        planned: { bg: "#faf5ff", accent: "#9333ea" },
+      };
+
+      let latestPayload = null;
+      let dragRecordId = null;
+
+      function postMessageToStreamlit(type, data) {
+        window.parent.postMessage({ isStreamlitMessage: true, type, ...data }, "*");
+      }
+
+      function setFrameHeight() {
+        const height = document.documentElement.scrollHeight || document.body.scrollHeight || 600;
+        postMessageToStreamlit("streamlit:setFrameHeight", { height });
+      }
+
+      function escapeHtml(value) {
+        return String(value ?? "")
+          .replaceAll("&", "&amp;")
+          .replaceAll("<", "&lt;")
+          .replaceAll(">", "&gt;")
+          .replaceAll('"', "&quot;")
+          .replaceAll("'", "&#039;");
+      }
+
+      function sendMove(recordId, planningBucket) {
+        postMessageToStreamlit("streamlit:setComponentValue", {
+          value: {
+            action: "move_task",
+            event_id: `${Date.now()}-${Math.random().toString(16).slice(2)}`,
+            record_id: recordId,
+            planning_bucket: planningBucket
+          },
+          dataType: "json",
+        });
+      }
+
+      function renderBoard(payload) {
+        latestPayload = payload;
+        const app = document.getElementById("app");
+        const weeks = payload.weeks || [];
+        const tasks = payload.tasks || [];
+        const taskByBucket = new Map();
+        tasks.forEach(task => {
+          const bucket = task.planning_bucket || "";
+          if (!taskByBucket.has(bucket)) taskByBucket.set(bucket, []);
+          taskByBucket.get(bucket).push(task);
+        });
+
+        const topNote = `
+          <div class="top-note">
+            <div>Task mozgatasa: fogd meg a kartyat es dobd egy masik blokkba.</div>
+            <div>Blokkba dobas utan a task due mezot a nap datumahoz igazítjuk.</div>
+          </div>
+        `;
+
+        const boardHtml = weeks.map(week => {
+          const days = (week.days || []).map(day => {
+            const blocks = (day.blocks || []).map(bucket => {
+              const lane = bucket.lane || "session";
+              const style = laneStyles[lane] || laneStyles.session;
+              const entries = (taskByBucket.get(bucket.key) || []).slice().sort((a, b) => {
+                const left = a.focus_rank == null ? 9999 : a.focus_rank;
+                const right = b.focus_rank == null ? 9999 : b.focus_rank;
+                return left - right;
+              });
+              const taskMarkup = entries.length
+                ? entries.map(task => `
+                  <div class="task" draggable="true" data-record-id="${escapeHtml(task.record_id)}" style="--bucket-accent:${style.accent};">
+                    <div class="task-title">${escapeHtml(task.title)}</div>
+                    <div class="task-meta">${escapeHtml(task.project || "-")} / ${escapeHtml(task.case_name || "-")}</div>
+                  </div>
+                `).join("")
+                : `<div class="empty">Ures blokk</div>`;
+              return `
+                <div class="bucket" data-bucket-key="${escapeHtml(bucket.key)}" style="--bucket-bg:${style.bg};--bucket-accent:${style.accent};">
+                  <div class="bucket-header">
+                    <div class="bucket-title">${escapeHtml(bucket.title)}</div>
+                    <div class="bucket-subtitle">${escapeHtml(day.title)}</div>
+                  </div>
+                  <div class="task-list">${taskMarkup}</div>
+                </div>
+              `;
+            }).join("");
+            return `
+              <div class="day">
+                <div class="day-header">
+                  <div class="day-title">${escapeHtml(day.title)}</div>
+                  <div class="day-date">${escapeHtml(day.date || "")}</div>
+                </div>
+                <div class="blocks">${blocks}</div>
+              </div>
+            `;
+          }).join("");
+          return `
+            <section class="week">
+              <div class="week-header">
+                <div class="week-title">${escapeHtml(week.title)}</div>
+                <div class="week-meta">${escapeHtml(week.start_date || "")}</div>
+              </div>
+              <div class="days">${days}</div>
+            </section>
+          `;
+        }).join("");
+
+        app.innerHTML = topNote + `<div class="board">${boardHtml}</div>`;
+
+        app.querySelectorAll(".task").forEach(taskEl => {
+          taskEl.addEventListener("dragstart", event => {
+            dragRecordId = taskEl.dataset.recordId;
+            taskEl.classList.add("dragging");
+            event.dataTransfer.setData("text/plain", dragRecordId || "");
+            event.dataTransfer.effectAllowed = "move";
+          });
+          taskEl.addEventListener("dragend", () => {
+            dragRecordId = null;
+            taskEl.classList.remove("dragging");
+            app.querySelectorAll(".bucket").forEach(bucket => bucket.classList.remove("drag-over"));
+          });
+        });
+
+        app.querySelectorAll(".bucket").forEach(bucketEl => {
+          bucketEl.addEventListener("dragover", event => {
+            event.preventDefault();
+            bucketEl.classList.add("drag-over");
+            event.dataTransfer.dropEffect = "move";
+          });
+          bucketEl.addEventListener("dragleave", () => bucketEl.classList.remove("drag-over"));
+          bucketEl.addEventListener("drop", event => {
+            event.preventDefault();
+            bucketEl.classList.remove("drag-over");
+            const recordId = dragRecordId || event.dataTransfer.getData("text/plain");
+            const targetBucket = bucketEl.dataset.bucketKey || "";
+            if (recordId && targetBucket) {
+              sendMove(recordId, targetBucket);
+            }
+          });
+        });
+
+        setTimeout(setFrameHeight, 0);
+      }
+
+      window.addEventListener("message", event => {
+        const message = event.data;
+        if (!message || message.type !== "streamlit:render") return;
+        renderBoard(message.args.payload || {});
+      });
+
+      window.addEventListener("load", () => {
+        postMessageToStreamlit("streamlit:componentReady", { apiVersion: 1 });
+        setFrameHeight();
+      });
+    </script>
+  </body>
+</html>
