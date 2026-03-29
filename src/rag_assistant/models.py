@@ -134,6 +134,7 @@ class KnowledgeRecord:
             "people": ", ".join(self.related_people),
             "tags": ", ".join(self.tags),
             "decision_needed": self.decision_needed,
+            "created_at": self.created_at,
             "start_at": self.start_at or "",
             "due_at": self.due_at or "",
             "deadline": self.deadline or "",

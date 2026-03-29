@@ -18,6 +18,8 @@
       body {
         margin: 0;
         padding: 12px;
+        height: 100vh;
+        overflow: hidden;
         background:
           radial-gradient(circle at top left, rgba(251, 191, 36, 0.14), transparent 28%),
           radial-gradient(circle at top right, rgba(59, 130, 246, 0.12), transparent 26%),
@@ -29,8 +31,11 @@
         display: flex;
         flex-direction: column;
         gap: 18px;
+        height: calc(100vh - 24px);
+        min-height: 0;
       }
       .top-note {
+        flex: 0 0 auto;
         display: flex;
         justify-content: space-between;
         align-items: center;
@@ -43,35 +48,122 @@
         font-size: 13px;
       }
       .board {
+        flex: 1 1 auto;
+        min-height: 0;
+        overflow: hidden;
+        display: grid;
+        grid-template-columns: minmax(260px, 320px) minmax(0, 1fr);
+        gap: 18px;
+        align-items: stretch;
+      }
+      .tree-pane {
+        height: 100%;
+        min-height: 0;
+        overflow: auto;
+        padding: 12px;
+        border-radius: 22px;
+        border: 1px solid var(--line);
+        background: rgba(255,255,255,0.88);
+        box-shadow: var(--shadow);
+      }
+      .tree-pane-title {
+        font-size: 16px;
+        font-weight: 700;
+        margin-bottom: 10px;
+      }
+      .tree-scroll {
         display: flex;
         flex-direction: column;
         gap: 18px;
       }
-      .week {
+      .board-pane {
+        display: flex;
+        flex-direction: column;
+        gap: 18px;
+        height: 100%;
+        min-height: 0;
+        overflow: auto;
+        padding: 2px 4px 2px 2px;
+        border-radius: 22px;
+        border: 1px solid rgba(226, 232, 240, 0.85);
+        background: rgba(255,255,255,0.3);
+      }
+      .section {
         padding: 14px;
         border-radius: 24px;
         border: 1px solid var(--line);
         background: linear-gradient(135deg, rgba(255,250,240,0.95), rgba(238,242,255,0.95));
         box-shadow: var(--shadow);
       }
-      .week-header {
-        margin-bottom: 12px;
+      details.tree {
+        border-radius: 20px;
       }
-      .week-title {
+      details.tree > summary {
+        list-style: none;
+        cursor: pointer;
+        display: flex;
+        align-items: center;
+        gap: 10px;
+        user-select: none;
+      }
+      details.tree > summary::-webkit-details-marker {
+        display: none;
+      }
+      .toggle {
+        width: 26px;
+        height: 26px;
+        display: inline-flex;
+        align-items: center;
+        justify-content: center;
+        border-radius: 999px;
+        background: #ffffff;
+        border: 1px solid var(--line);
+        font-weight: 700;
+        color: #334155;
+        flex: 0 0 auto;
+        cursor: pointer;
+      }
+      button.toggle {
+        appearance: none;
+      }
+      details.tree[open] > summary .toggle::before {
+        content: "−";
+      }
+      details.tree:not([open]) > summary .toggle::before {
+        content: "+";
+      }
+      .section-title {
         font-size: 22px;
         font-weight: 700;
       }
-      .week-meta {
+      .section-meta {
         font-size: 11px;
         letter-spacing: 0.08em;
         text-transform: uppercase;
         color: var(--muted);
         margin-top: 2px;
       }
+      .section-body {
+        margin-top: 12px;
+      }
       .days {
         display: flex;
         flex-direction: column;
         gap: 14px;
+      }
+      .group {
+        padding: 10px 12px;
+        border-radius: 18px;
+        background: rgba(255,255,255,0.35);
+        border: 1px solid rgba(148, 163, 184, 0.22);
+      }
+      .group-title {
+        font-size: 16px;
+        font-weight: 700;
+      }
+      .group-meta {
+        font-size: 12px;
+        color: var(--muted);
       }
       .day {
         padding: 12px;
@@ -155,6 +247,74 @@
         border-radius: 14px;
         background: rgba(255,255,255,0.5);
       }
+      .tree-list {
+        display: flex;
+        flex-direction: column;
+        gap: 8px;
+      }
+      .tree-section {
+        border-left: 1px solid #dbe4ee;
+        padding-left: 10px;
+        margin-left: 12px;
+      }
+      .tree-day {
+        margin-top: 6px;
+      }
+      .tree-drop {
+        margin-top: 6px;
+        padding: 7px 10px;
+        border-radius: 12px;
+        border: 1px dashed rgba(100, 116, 139, 0.45);
+        background: rgba(255,255,255,0.72);
+        font-size: 13px;
+        color: #334155;
+      }
+      .tree-drop.drag-over {
+        border-color: #0f172a;
+        background: #fff7ed;
+      }
+      .tree-link {
+        cursor: pointer;
+      }
+      .tree-actions {
+        display: flex;
+        gap: 6px;
+        margin-top: 6px;
+      }
+      .mini-btn {
+        appearance: none;
+        border: 1px solid #cbd5e1;
+        background: white;
+        border-radius: 999px;
+        min-width: 28px;
+        height: 28px;
+        cursor: pointer;
+        color: #334155;
+        font-weight: 700;
+      }
+      .mini-btn.danger {
+        color: #b91c1c;
+        border-color: #fecaca;
+      }
+      @media (max-width: 980px) {
+        body {
+          height: auto;
+          overflow: auto;
+        }
+        #app {
+          height: auto;
+        }
+        .board {
+          grid-template-columns: 1fr;
+          overflow: visible;
+        }
+        .tree-pane,
+        .board-pane {
+          height: auto;
+          max-height: none;
+          overflow: visible;
+        }
+      }
     </style>
   </head>
   <body>
@@ -178,7 +338,9 @@
       }
 
       function setFrameHeight() {
-        const height = document.documentElement.scrollHeight || document.body.scrollHeight || 600;
+        const desktopHeight = Math.max(720, Math.min(window.innerHeight - 24, 1040));
+        const mobileHeight = document.documentElement.scrollHeight || document.body.scrollHeight || 900;
+        const height = window.innerWidth <= 980 ? mobileHeight : desktopHeight;
         postMessageToStreamlit("streamlit:setFrameHeight", { height });
       }
 
@@ -203,14 +365,121 @@
         });
       }
 
+      function sendAction(payload) {
+        postMessageToStreamlit("streamlit:setComponentValue", {
+          value: {
+            event_id: `${Date.now()}-${Math.random().toString(16).slice(2)}`,
+            ...payload
+          },
+          dataType: "json",
+        });
+      }
+
+      function restoreScrollPositions() {
+        const treePane = document.querySelector(".tree-pane");
+        const boardPane = document.querySelector(".board-pane");
+        if (treePane) treePane.scrollTop = Number(sessionStorage.getItem("execution_tree_scroll") || 0);
+        if (boardPane) boardPane.scrollTop = Number(sessionStorage.getItem("execution_board_scroll") || 0);
+      }
+
+      function attachScrollPersistence() {
+        const treePane = document.querySelector(".tree-pane");
+        const boardPane = document.querySelector(".board-pane");
+        if (treePane) {
+          treePane.addEventListener("scroll", () => sessionStorage.setItem("execution_tree_scroll", String(treePane.scrollTop)));
+        }
+        if (boardPane) {
+          boardPane.addEventListener("scroll", () => sessionStorage.setItem("execution_board_scroll", String(boardPane.scrollTop)));
+        }
+      }
+
+      function attachDropTargets(app) {
+        app.querySelectorAll("[data-bucket-key]").forEach(targetEl => {
+          targetEl.addEventListener("dragover", event => {
+            event.preventDefault();
+            targetEl.classList.add("drag-over");
+            event.dataTransfer.dropEffect = "move";
+          });
+          targetEl.addEventListener("dragleave", () => targetEl.classList.remove("drag-over"));
+          targetEl.addEventListener("drop", event => {
+            event.preventDefault();
+            targetEl.classList.remove("drag-over");
+            const recordId = dragRecordId || event.dataTransfer.getData("text/plain");
+            const targetBucket = targetEl.dataset.bucketKey || "";
+            if (recordId && targetBucket) {
+              sendMove(recordId, targetBucket);
+            }
+          });
+        });
+      }
+
+      function attachTreeInteractions(app) {
+        app.querySelectorAll("details.tree > summary").forEach(summaryEl => {
+          summaryEl.addEventListener("click", event => {
+            const toggle = event.target.closest(".toggle");
+            const link = event.target.closest(".tree-link");
+            if (toggle) {
+              event.preventDefault();
+              const details = summaryEl.parentElement;
+              details.open = !details.open;
+              return;
+            }
+            if (link) {
+              event.preventDefault();
+              const anchorId = link.dataset.anchorTarget;
+              const boardPane = document.querySelector(".board-pane");
+              const target = anchorId ? document.getElementById(anchorId) : null;
+              if (boardPane && target) {
+                boardPane.scrollTo({ top: Math.max(0, target.offsetTop - 12), behavior: "smooth" });
+              }
+              return;
+            }
+            event.preventDefault();
+          });
+        });
+
+        app.querySelectorAll("[data-add-block-day]").forEach(button => {
+          button.addEventListener("click", event => {
+            event.preventDefault();
+            const dayKey = button.dataset.addBlockDay || "";
+            const title = window.prompt("Uj blokk neve:");
+            if (dayKey && title && title.trim()) {
+              sendAction({ action: "add_block", day_key: dayKey, title: title.trim() });
+            }
+          });
+        });
+
+        app.querySelectorAll("[data-remove-block]").forEach(button => {
+          button.addEventListener("click", event => {
+            event.preventDefault();
+            const blockKey = button.dataset.removeBlock || "";
+            if (blockKey && window.confirm("Toroljuk ezt a blokkot? A tartalma aznapi Mindenkepp blokkba kerul.")) {
+              sendAction({ action: "remove_block", block_key: blockKey });
+            }
+          });
+        });
+
+        app.querySelectorAll("[data-rename-day]").forEach(button => {
+          button.addEventListener("click", event => {
+            event.preventDefault();
+            const dayKey = button.dataset.renameDay || "";
+            const currentTitle = button.dataset.currentTitle || "";
+            const title = window.prompt("Nap uj neve:", currentTitle);
+            if (dayKey && title && title.trim()) {
+              sendAction({ action: "rename_day", day_key: dayKey, title: title.trim() });
+            }
+          });
+        });
+      }
+
       function renderBoard(payload) {
         latestPayload = payload;
         const app = document.getElementById("app");
-        const weeks = payload.weeks || [];
+        const sections = payload.sections || [];
         const tasks = payload.tasks || [];
         const taskByBucket = new Map();
         tasks.forEach(task => {
-          const bucket = task.planning_bucket || "";
+          const bucket = task.planning_bucket || "__unscheduled__";
           if (!taskByBucket.has(bucket)) taskByBucket.set(bucket, []);
           taskByBucket.get(bucket).push(task);
         });
@@ -222,8 +491,68 @@
           </div>
         `;
 
-        const boardHtml = weeks.map(week => {
-          const days = (week.days || []).map(day => {
+        const treeHtml = sections.map(section => {
+          const isUnscheduled = section.key === "unscheduled";
+          const groups = isUnscheduled
+            ? [{ title: "Idopont nelkul", meta: "", days: [{ key: "__unscheduled__", title: "Idopont nelkul", date: "", blocks: [{ key: "__unscheduled__", title: "Idopont nelkul", lane: "parking" }] }] }]
+            : (section.groups || []);
+          const groupTreeHtml = groups.map(group => {
+            const dayTreeHtml = (group.days || []).map(day => {
+            const blockTreeHtml = (day.blocks || []).map(bucket => `
+              <div class="tree-drop" data-bucket-key="${escapeHtml(bucket.key)}">
+                <div style="display:flex;align-items:center;justify-content:space-between;gap:8px;"><span>${escapeHtml(bucket.title)}</span>${bucket.lane === "session" ? `<button class="mini-btn danger" data-remove-block="${escapeHtml(bucket.key)}">×</button>` : ``}</div>
+              </div>
+            `).join("");
+            return `
+              <details class="tree tree-day" open>
+                <summary>
+                  <button class="toggle" type="button" aria-label="Nyitas-zaras"></button>
+                  <span class="tree-link" data-anchor-target="anchor-${escapeHtml(day.key || day.title)}">
+                    <div class="day-title" style="font-size:14px;">${escapeHtml(day.title)}</div>
+                    <div class="day-date">${escapeHtml(day.date || "")}</div>
+                  </span>
+                  ${day.key !== "__unscheduled__" ? `<button class="mini-btn" data-add-block-day="${escapeHtml(day.key || "")}">+</button><button class="mini-btn" data-rename-day="${escapeHtml(day.key || "")}" data-current-title="${escapeHtml(day.title || "")}">✎</button>` : ``}
+                </summary>
+                <div class="tree-section">
+                  ${blockTreeHtml}
+                </div>
+              </details>
+            `;
+            }).join("");
+            return `
+              <details class="tree group" open>
+                <summary>
+                  <button class="toggle" type="button" aria-label="Nyitas-zaras"></button>
+                  <span class="tree-link" data-anchor-target="anchor-group-${escapeHtml(group.key || group.title)}">
+                    <div class="group-title">${escapeHtml(group.title || "")}</div>
+                    <div class="group-meta">${escapeHtml(group.meta || "")}</div>
+                  </span>
+                </summary>
+                <div class="tree-section">${dayTreeHtml}</div>
+              </details>
+            `;
+          }).join("");
+          return `
+            <details class="tree" open>
+              <summary>
+                <button class="toggle" type="button" aria-label="Nyitas-zaras"></button>
+                <span class="tree-link" data-anchor-target="anchor-section-${escapeHtml(section.key || section.title)}">
+                  <div style="font-weight:700;">${escapeHtml(section.title)}</div>
+                  <div class="section-meta">${escapeHtml(section.meta || "")}</div>
+                </span>
+              </summary>
+              <div class="tree-section">${groupTreeHtml}</div>
+            </details>
+          `;
+        }).join("");
+
+        const boardHtml = sections.map(section => {
+          const isUnscheduled = section.key === "unscheduled";
+          const groups = isUnscheduled
+            ? [{ title: "Idopont nelkul", meta: "", days: [{ key: "__unscheduled__", title: "Idopont nelkul", date: "", blocks: [{ key: "__unscheduled__", title: "Idopont nelkul", lane: "parking" }] }] }]
+            : (section.groups || []);
+          const groupsHtml = groups.map(group => {
+            const daysHtml = (group.days || []).map(day => {
             const blocks = (day.blocks || []).map(bucket => {
               const lane = bucket.lane || "session";
               const style = laneStyles[lane] || laneStyles.session;
@@ -243,7 +572,10 @@
               return `
                 <div class="bucket" data-bucket-key="${escapeHtml(bucket.key)}" style="--bucket-bg:${style.bg};--bucket-accent:${style.accent};">
                   <div class="bucket-header">
-                    <div class="bucket-title">${escapeHtml(bucket.title)}</div>
+                    <div style="display:flex;align-items:center;justify-content:space-between;gap:8px;">
+                      <div class="bucket-title">${escapeHtml(bucket.title)}</div>
+                      ${bucket.lane === "session" ? `<button class="mini-btn danger" data-remove-block="${escapeHtml(bucket.key)}">×</button>` : ``}
+                    </div>
                     <div class="bucket-subtitle">${escapeHtml(day.title)}</div>
                   </div>
                   <div class="task-list">${taskMarkup}</div>
@@ -251,27 +583,61 @@
               `;
             }).join("");
             return `
-              <div class="day">
-                <div class="day-header">
-                  <div class="day-title">${escapeHtml(day.title)}</div>
-                  <div class="day-date">${escapeHtml(day.date || "")}</div>
+              <details class="tree day" open>
+                <summary class="day-header" id="anchor-${escapeHtml(day.key || day.title)}">
+                  <button class="toggle" type="button" aria-label="Nyitas-zaras"></button>
+                  <span>
+                    <div class="day-title">${escapeHtml(day.title)}</div>
+                    <div class="day-date">${escapeHtml(day.date || "")}</div>
+                  </span>
+                  ${day.key !== "__unscheduled__" ? `<button class="mini-btn" data-add-block-day="${escapeHtml(day.key || "")}">+</button><button class="mini-btn" data-rename-day="${escapeHtml(day.key || "")}" data-current-title="${escapeHtml(day.title || "")}">✎</button>` : ``}
+                </summary>
+                <div class="section-body">
+                  <div class="blocks">${blocks}</div>
                 </div>
-                <div class="blocks">${blocks}</div>
-              </div>
+              </details>
+            `;
+            }).join("");
+            return `
+              <details class="tree group" open id="anchor-group-${escapeHtml(group.key || group.title)}">
+                <summary>
+                  <button class="toggle" type="button" aria-label="Nyitas-zaras"></button>
+                  <span>
+                    <div class="group-title">${escapeHtml(group.title || "")}</div>
+                    <div class="group-meta">${escapeHtml(group.meta || "")}</div>
+                  </span>
+                </summary>
+                <div class="section-body">
+                  <div class="days">${daysHtml}</div>
+                </div>
+              </details>
             `;
           }).join("");
           return `
-            <section class="week">
-              <div class="week-header">
-                <div class="week-title">${escapeHtml(week.title)}</div>
-                <div class="week-meta">${escapeHtml(week.start_date || "")}</div>
+            <details class="tree section" open id="anchor-section-${escapeHtml(section.key || section.title)}">
+              <summary>
+                <button class="toggle" type="button" aria-label="Nyitas-zaras"></button>
+                <span>
+                  <div class="section-title">${escapeHtml(section.title)}</div>
+                  <div class="section-meta">${escapeHtml(section.meta || "")}</div>
+                </span>
+              </summary>
+              <div class="section-body">
+                <div class="days">${groupsHtml}</div>
               </div>
-              <div class="days">${days}</div>
-            </section>
+            </details>
           `;
         }).join("");
 
-        app.innerHTML = topNote + `<div class="board">${boardHtml}</div>`;
+        app.innerHTML = topNote + `
+          <div class="board">
+            <aside class="tree-pane">
+              <div class="tree-pane-title">Tervezesi fa</div>
+              <div class="tree-scroll">${treeHtml}</div>
+            </aside>
+            <div class="board-pane">${boardHtml}</div>
+          </div>
+        `;
 
         app.querySelectorAll(".task").forEach(taskEl => {
           taskEl.addEventListener("dragstart", event => {
@@ -283,27 +649,14 @@
           taskEl.addEventListener("dragend", () => {
             dragRecordId = null;
             taskEl.classList.remove("dragging");
-            app.querySelectorAll(".bucket").forEach(bucket => bucket.classList.remove("drag-over"));
+            app.querySelectorAll(".drag-over").forEach(node => node.classList.remove("drag-over"));
           });
         });
 
-        app.querySelectorAll(".bucket").forEach(bucketEl => {
-          bucketEl.addEventListener("dragover", event => {
-            event.preventDefault();
-            bucketEl.classList.add("drag-over");
-            event.dataTransfer.dropEffect = "move";
-          });
-          bucketEl.addEventListener("dragleave", () => bucketEl.classList.remove("drag-over"));
-          bucketEl.addEventListener("drop", event => {
-            event.preventDefault();
-            bucketEl.classList.remove("drag-over");
-            const recordId = dragRecordId || event.dataTransfer.getData("text/plain");
-            const targetBucket = bucketEl.dataset.bucketKey || "";
-            if (recordId && targetBucket) {
-              sendMove(recordId, targetBucket);
-            }
-          });
-        });
+        attachDropTargets(app);
+        attachTreeInteractions(app);
+        attachScrollPersistence();
+        restoreScrollPositions();
 
         setTimeout(setFrameHeight, 0);
       }

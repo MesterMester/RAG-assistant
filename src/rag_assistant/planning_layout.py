@@ -20,29 +20,54 @@ def _week_title(start: date) -> str:
     return f"{start.isoformat()} - {end.isoformat()}"
 
 
-def _default_week() -> dict:
-    today = date.today()
-    week_start = today - timedelta(days=today.weekday())
+def _weekday_title(day_value: date) -> str:
+    return day_value.strftime("%A")
+
+
+def _default_day(day_value: date, include_current_blocks: bool = False) -> dict:
+    day_key = f"day-{day_value.isoformat()}"
+    blocks = [
+        {"key": f"{day_key}-must", "title": "Mindenkepp", "lane": "must"},
+        {"key": f"{day_key}-prefer", "title": "Lehetoleg", "lane": "prefer"},
+    ]
+    if include_current_blocks:
+        blocks = [
+            {"key": f"{day_key}-focus", "title": "Fo fokusz most", "lane": "focus"},
+            {"key": f"{day_key}-must", "title": "Ma mindenkep", "lane": "must"},
+            {"key": f"{day_key}-prefer", "title": "Lehetoleg ma", "lane": "prefer"},
+        ]
     return {
-        "key": f"week-{week_start.isoformat()}",
-        "title": _week_title(week_start),
-        "start_date": week_start.isoformat(),
-        "days": [
-            {
-                "key": f"day-{today.isoformat()}",
-                "title": today.strftime("%A"),
-                "date": today.isoformat(),
-                "blocks": [
-                    {"key": f"block-{today.isoformat()}-must", "title": "Mindenkepp", "lane": "must"},
-                    {"key": f"block-{today.isoformat()}-prefer", "title": "Lehetoleg", "lane": "prefer"},
-                ],
-            }
-        ],
+        "key": day_key,
+        "title": _weekday_title(day_value),
+        "date": day_value.isoformat(),
+        "blocks": blocks,
+    }
+
+
+def _default_week(start_day: date, include_today_structure: bool = False) -> dict:
+    days = []
+    for offset in range(7):
+        day_value = start_day + timedelta(days=offset)
+        days.append(_default_day(day_value, include_current_blocks=include_today_structure and offset == date.today().weekday()))
+    return {
+        "key": f"week-{start_day.isoformat()}",
+        "title": _week_title(start_day),
+        "start_date": start_day.isoformat(),
+        "days": days,
     }
 
 
 def default_layout() -> dict:
-    return {"version": 2, "weeks": [_default_week()]}
+    today = date.today()
+    current_week_start = today - timedelta(days=today.weekday())
+    next_week_start = current_week_start + timedelta(days=7)
+    return {
+        "version": 2,
+        "weeks": [
+            _default_week(current_week_start, include_today_structure=True),
+            _default_week(next_week_start, include_today_structure=False),
+        ],
+    }
 
 
 def _migrate_legacy_layout(payload: dict) -> dict:
@@ -94,8 +119,21 @@ def save_planning_layout(path: Path, layout: dict) -> None:
 
 def ensure_layout(path: Path) -> dict:
     layout = load_planning_layout(path)
+    layout = ensure_standard_weeks(layout)
     if not path.exists():
         save_planning_layout(path, layout)
+    return layout
+
+
+def ensure_standard_weeks(layout: dict) -> dict:
+    today = date.today()
+    current_week_start = today - timedelta(days=today.weekday())
+    starts = {week.get("start_date") for week in layout.get("weeks", [])}
+    for offset in range(-1, 10):
+        week_start = current_week_start + timedelta(days=7 * offset)
+        if week_start.isoformat() not in starts:
+            layout.setdefault("weeks", []).append(_default_week(week_start, include_today_structure=(offset == 0)))
+    layout["weeks"].sort(key=lambda week: week.get("start_date") or "9999-99-99")
     return layout
 
 
@@ -195,6 +233,42 @@ def remove_block(layout: dict, block_key: str) -> dict:
         week["days"] = [day for day in week.get("days", []) if day.get("blocks")]
     layout["weeks"] = [week for week in layout.get("weeks", []) if week.get("days")]
     return layout
+
+
+def find_day(layout: dict, day_key: str) -> dict | None:
+    for week in layout.get("weeks", []):
+        for day in week.get("days", []):
+            if day.get("key") == day_key:
+                return day
+    return None
+
+
+def rename_day(layout: dict, day_key: str, title: str) -> dict:
+    day = find_day(layout, day_key)
+    if day:
+        day["title"] = title.strip()
+    return layout
+
+
+def find_block(layout: dict, block_key: str) -> dict | None:
+    for day in [day for week in layout.get("weeks", []) for day in week.get("days", [])]:
+        for block in day.get("blocks", []):
+            if block.get("key") == block_key:
+                enriched = dict(block)
+                enriched["day_key"] = day.get("key", "")
+                enriched["day_date"] = day.get("date")
+                return enriched
+    return None
+
+
+def must_bucket_for_day(layout: dict, day_key: str) -> str | None:
+    day = find_day(layout, day_key)
+    if not day:
+        return None
+    for block in day.get("blocks", []):
+        if block.get("lane") == "must":
+            return block.get("key")
+    return None
 
 
 def day_for_bucket(layout: dict, bucket_key: str) -> dict | None:

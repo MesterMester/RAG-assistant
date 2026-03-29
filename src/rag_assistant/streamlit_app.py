@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 from dataclasses import replace
-from datetime import date
+from datetime import date, timedelta
 import subprocess
 
 import pandas as pd
@@ -19,8 +19,12 @@ from rag_assistant.planning_layout import (
     add_week,
     day_for_bucket,
     ensure_layout,
+    find_block,
+    find_day,
     iter_buckets,
     layout_rows,
+    must_bucket_for_day,
+    rename_day,
     remove_block,
     remove_day,
     remove_week,
@@ -160,6 +164,137 @@ def persist_planning_layout(layout: dict, layout_path) -> None:
     save_planning_layout(layout_path, layout)
     st.success("Planning layout mentve.")
     st.rerun()
+
+
+def persist_layout_and_records(
+    layout: dict,
+    layout_path,
+    records: list[KnowledgeRecord],
+    source_dir,
+    config,
+    records_path,
+    index_path,
+    chroma_dir,
+    success_message: str,
+) -> None:
+    save_planning_layout(layout_path, layout)
+    persist_records_bulk(records, source_dir, config, records_path, index_path, chroma_dir, success_message)
+
+
+def day_display_title(day_date: date, today: date) -> str:
+    if day_date == today:
+        return "Ma"
+    if day_date == today + timedelta(days=1):
+        return "Holnap"
+    if day_date == today + timedelta(days=2):
+        return "Holnaputan"
+    return day_date.strftime("%A")
+
+
+def build_execution_sections(layout: dict) -> list[dict]:
+    today = date.today()
+    current_week_start = today - timedelta(days=today.weekday())
+    next_week_start = current_week_start + timedelta(days=7)
+    current_week_end = current_week_start + timedelta(days=6)
+    next_week_end = next_week_start + timedelta(days=6)
+
+    all_days: list[dict] = []
+    for week in layout.get("weeks", []):
+        for day in week.get("days", []):
+            day_date_raw = day.get("date")
+            if not day_date_raw:
+                continue
+            display_day = dict(day)
+            display_day["date_obj"] = date.fromisoformat(day_date_raw)
+            all_days.append(display_day)
+    all_days.sort(key=lambda item: item["date_obj"])
+
+    def make_group(key: str, title: str, days: list[dict], meta: str = "") -> dict:
+        serialized_days = []
+        for day in days:
+            serialized_day = dict(day)
+            serialized_day.pop("date_obj", None)
+            serialized_days.append(serialized_day)
+        return {"key": key, "title": title, "meta": meta, "days": serialized_days}
+
+    def make_week_group(week_start: date, days: list[dict]) -> dict:
+        week_no = week_start.isocalendar().week
+        week_end = week_start + timedelta(days=6)
+        return make_group(
+            f"week-{week_start.isoformat()}",
+            f"{week_no}. het",
+            days,
+            f"{week_start.strftime('%m.%d')} - {week_end.strftime('%m.%d')}",
+        )
+
+    def merge_weekend(days: list[dict]) -> list[dict]:
+        merged: list[dict] = []
+        weekend_days = [day for day in days if day["date_obj"].weekday() >= 5]
+        normal_days = [day for day in days if day["date_obj"].weekday() < 5]
+        for day in normal_days:
+            merged.append(day)
+        if weekend_days:
+            blocks = []
+            for day in weekend_days:
+                for block in day.get("blocks", []):
+                    merged_block = dict(block)
+                    merged_block["title"] = f"{day.get('title', '')} - {block.get('title', '')}"
+                    blocks.append(merged_block)
+            merged.append(
+                {
+                    "key": f"weekend-{'-'.join(day['key'] for day in weekend_days)}",
+                    "title": "Hetvege",
+                    "date": f"{weekend_days[0]['date']} / {weekend_days[-1]['date']}",
+                    "blocks": blocks,
+                    "date_obj": weekend_days[0]["date_obj"],
+                }
+            )
+        return merged
+
+    yesterday = today - timedelta(days=1)
+    day_before = today - timedelta(days=2)
+
+    past_yesterday = [dict(day, title="Tegnap") for day in all_days if day["date_obj"] == yesterday]
+    past_day_before = [dict(day, title="Tegnapelott") for day in all_days if day["date_obj"] == day_before]
+    past_earlier_this_week = [day for day in all_days if current_week_start <= day["date_obj"] < day_before]
+    past_older = [day for day in all_days if day["date_obj"] < current_week_start]
+
+    future_tomorrow = [dict(day, title="Holnap") for day in all_days if day["date_obj"] == today + timedelta(days=1)]
+    future_this_week = [day for day in all_days if today + timedelta(days=2) <= day["date_obj"] <= current_week_end]
+    future_next_week = [day for day in all_days if next_week_start <= day["date_obj"] <= next_week_end]
+    future_later_weeks: list[dict] = []
+    for offset in range(2, 10):
+        week_start = current_week_start + timedelta(days=7 * offset)
+        week_end = week_start + timedelta(days=6)
+        week_days = [day for day in all_days if week_start <= day["date_obj"] <= week_end]
+        if week_days:
+            future_later_weeks.append(make_week_group(week_start, merge_weekend(week_days)))
+
+    sections: list[dict] = [
+        {"key": "today", "title": "Ma", "groups": [make_group("today", "Ma", [dict(day, title="Ma") for day in all_days if day["date_obj"] == today])]},
+        {
+            "key": "past",
+            "title": "Mult",
+            "groups": [
+                make_group("yesterday", "Tegnap", past_yesterday),
+                make_group("day_before", "Tegnapelott", past_day_before),
+                make_group("earlier_this_week", "Korabban a heten", past_earlier_this_week),
+                make_group("older", "Regebb", past_older),
+            ],
+        },
+        {
+            "key": "future",
+            "title": "Jovo",
+            "groups": [
+                make_group("tomorrow", "Holnap", future_tomorrow),
+                make_group("this_week", "A heten", merge_weekend(future_this_week)),
+                make_group("next_week", "Jovo het", merge_weekend(future_next_week)),
+                *future_later_weeks,
+            ],
+        },
+        {"key": "unscheduled", "title": "Idopont nelkul", "groups": [make_group("unscheduled", "Idopont nelkul", [])]},
+    ]
+    return sections
 
 
 def get_selected_record(records: list[KnowledgeRecord]) -> KnowledgeRecord | None:
@@ -827,7 +962,7 @@ def render_execution_layout_manager(layout: dict, layout_path) -> None:
                 else:
                     persist_planning_layout(add_block(layout, target_day, new_block_title.strip(), "session"), layout_path)
 
-        remove_col1, remove_col2, remove_col3 = st.columns(3)
+        remove_col1, remove_col2 = st.columns(2)
         if weeks:
             removable_week = remove_col1.selectbox(
                 "Torolheto het",
@@ -846,20 +981,7 @@ def render_execution_layout_manager(layout: dict, layout_path) -> None:
             )
             if removable_day and remove_col2.button("Nap torlese", key="planning_remove_day_button"):
                 persist_planning_layout(remove_day(layout, removable_day), layout_path)
-        removable_blocks = [bucket for bucket in iter_buckets(layout) if bucket.get("lane") == "session"]
-        if removable_blocks:
-            removable_block = remove_col3.selectbox(
-                "Torolheto blokk",
-                options=[""] + [bucket.get("key", "") for bucket in removable_blocks],
-                format_func=lambda key: "" if not key else next(
-                    f"{bucket.get('week_title', '')} / {bucket.get('day_title', '')} / {bucket.get('title', key)}"
-                    for bucket in removable_blocks
-                    if bucket.get("key") == key
-                ),
-                key="planning_remove_block",
-            )
-            if removable_block and remove_col3.button("Blokk torlese", key="planning_remove_block_button"):
-                persist_planning_layout(remove_block(layout, removable_block), layout_path)
+        st.caption("Kezzel felvett blokk torlese: a jobb oldali execution nezet napjanal a blokk melletti `x` gombbal.")
 
 
 def render_execution_graph(records: list[KnowledgeRecord], layout: dict, layout_path, source_dir, config, records_path, index_path, chroma_dir) -> None:
@@ -873,7 +995,7 @@ def render_execution_graph(records: list[KnowledgeRecord], layout: dict, layout_
         return
 
     component_payload = {
-        "weeks": layout.get("weeks", []),
+        "sections": build_execution_sections(layout),
         "tasks": [
             {
                 "record_id": record.record_id,
@@ -888,7 +1010,7 @@ def render_execution_graph(records: list[KnowledgeRecord], layout: dict, layout_
     }
 
     drag_result = execution_dnd_board(component_payload, key="execution_dnd_surface")
-    if isinstance(drag_result, dict) and drag_result.get("action") == "move_task":
+    if isinstance(drag_result, dict) and drag_result.get("action") in {"move_task", "add_block", "remove_block", "rename_day"}:
         event_id = str(drag_result.get("event_id", "")).strip()
         if event_id and st.session_state.get("last_execution_drag_event") == event_id:
             drag_result = None
@@ -898,13 +1020,14 @@ def render_execution_graph(records: list[KnowledgeRecord], layout: dict, layout_
         record_id = str(drag_result.get("record_id", "")).strip()
         planning_bucket = str(drag_result.get("planning_bucket", "")).strip()
         dragged_record = next((record for record in task_records if record.record_id == record_id), None)
-        if dragged_record and planning_bucket and planning_bucket != dragged_record.planning_bucket:
-            bucket_info = day_for_bucket(layout, planning_bucket)
-            next_due = bucket_info.get("day_date") if bucket_info else dragged_record.due_at
+        normalized_bucket = "" if planning_bucket == "__unscheduled__" else planning_bucket
+        if dragged_record and normalized_bucket != dragged_record.planning_bucket:
+            bucket_info = day_for_bucket(layout, normalized_bucket) if normalized_bucket else None
+            next_due = bucket_info.get("day_date") if bucket_info else None
             persist_record(
                 update_record(
                     dragged_record,
-                    planning_bucket=planning_bucket,
+                    planning_bucket=normalized_bucket,
                     due_at=next_due,
                     focus_rank=None,
                 ),
@@ -914,26 +1037,40 @@ def render_execution_graph(records: list[KnowledgeRecord], layout: dict, layout_
                 index_path,
                 chroma_dir,
             )
-
-    unscheduled_tasks = [record for record in task_records if not record.planning_bucket]
-    if unscheduled_tasks:
-        st.markdown("**Idopont nelkul**")
-        rows = [
-            {
-                "title": record.title,
-                "project": record.project,
-                "case": record.case_name,
-                "status": record.status,
-                "due_at": record.due_at or "",
-                "deadline": record.deadline or "",
-            }
-            for record in unscheduled_tasks
-        ]
-        st.dataframe(pd.DataFrame(rows), use_container_width=True, hide_index=True)
-        for record in unscheduled_tasks:
-            if st.button(f"Megnyit: {record.title}", key=f"open_unscheduled_{record.record_id}"):
-                st.session_state["selected_record_id"] = record.record_id
-                st.rerun()
+    if isinstance(drag_result, dict) and drag_result.get("action") == "add_block":
+        day_key = str(drag_result.get("day_key", "")).strip()
+        title = str(drag_result.get("title", "")).strip()
+        if day_key and title:
+            persist_planning_layout(add_block(layout, day_key, title, "session"), layout_path)
+    if isinstance(drag_result, dict) and drag_result.get("action") == "rename_day":
+        day_key = str(drag_result.get("day_key", "")).strip()
+        title = str(drag_result.get("title", "")).strip()
+        if day_key and title and find_day(layout, day_key):
+            persist_planning_layout(rename_day(layout, day_key, title), layout_path)
+    if isinstance(drag_result, dict) and drag_result.get("action") == "remove_block":
+        block_key = str(drag_result.get("block_key", "")).strip()
+        block_info = find_block(layout, block_key) if block_key else None
+        if block_info and block_info.get("lane") == "session":
+            must_bucket = must_bucket_for_day(layout, block_info.get("day_key", ""))
+            updated_records = records
+            if must_bucket:
+                updated_records = [
+                    update_record(record, planning_bucket=must_bucket, due_at=block_info.get("day_date"))
+                    if record.planning_bucket == block_key
+                    else record
+                    for record in records
+                ]
+            persist_layout_and_records(
+                remove_block(layout, block_key),
+                layout_path,
+                updated_records,
+                source_dir,
+                config,
+                records_path,
+                index_path,
+                chroma_dir,
+                "Blokk torolve, a taskok aznapi Mindenkepp blokkba kerultek.",
+            )
 
     known_bucket_keys = {bucket.get("key", "") for bucket in iter_buckets(layout)}
     orphan_tasks = [record for record in task_records if record.planning_bucket and record.planning_bucket not in known_bucket_keys]
@@ -1102,6 +1239,21 @@ def app() -> None:
             )
             filter_text = filter_col8.text_input("Altalanos szoveges szures", key="table_filter_text")
 
+            sort_col1, sort_col2 = st.columns(2)
+            table_sort_by = sort_col1.selectbox(
+                "Rendezes",
+                options=["updated_at", "created_at", "title", "due_at", "deadline"],
+                format_func=lambda value: {
+                    "updated_at": "Utoljara frissitve",
+                    "created_at": "Letrehozva",
+                    "title": "Cim",
+                    "due_at": "Due date",
+                    "deadline": "Deadline",
+                }.get(value, value),
+                key="table_sort_by",
+            )
+            table_sort_desc = sort_col2.checkbox("Csokkeno sorrend", value=True, key="table_sort_desc")
+
             filtered_records = records
             if filter_title.strip():
                 needle = filter_title.strip().lower()
@@ -1137,6 +1289,17 @@ def app() -> None:
                     or needle in record.case_name.lower()
                 ]
 
+            filtered_records.sort(
+                key=lambda record: {
+                    "updated_at": record.updated_at or "",
+                    "created_at": record.created_at or "",
+                    "title": record.title.lower(),
+                    "due_at": record.due_at or "",
+                    "deadline": record.deadline or "",
+                }.get(table_sort_by, record.updated_at or ""),
+                reverse=table_sort_desc,
+            )
+
             rows = [record.to_table_row() for record in filtered_records]
             if rows:
                 st.caption("A tabla itt helyben szerkesztheto. A valtozasok az Alkalmaz gombbal irhatok vissza.")
@@ -1146,13 +1309,14 @@ def app() -> None:
                     use_container_width=True,
                     hide_index=True,
                     key="records_table_editor",
-                    disabled=["record_id", "updated_at"],
+                    disabled=["record_id", "created_at", "updated_at"],
                     column_config={
                         "entity_type": st.column_config.SelectboxColumn("entitas", options=ENTITY_OPTIONS, required=True),
                         "status": st.column_config.SelectboxColumn("statusz", options=STATUS_OPTIONS, required=True),
                         "decision_needed": st.column_config.CheckboxColumn("dontes?"),
                         "planning_bucket": st.column_config.SelectboxColumn("tervezesi hely", options=planning_options),
                         "record_id": st.column_config.TextColumn("record_id", disabled=True),
+                        "created_at": st.column_config.TextColumn("created_at", disabled=True),
                         "updated_at": st.column_config.TextColumn("updated_at", disabled=True),
                     },
                 )
@@ -1321,7 +1485,23 @@ def app() -> None:
         if not records:
             st.info("Meg nincs megjelenitheto rekord.")
         else:
-            st.caption("Jelmagyarazat: kor kek = organization, hatszog ciankek = team, zold doboz = project, rozsaszin elem = case, sarga nyil = task, piros rombusz = decision, lila doboz = event, krem 3D doboz = person, feher jegyzet = note, szurke tab = source_item.")
+            st.markdown(
+                """
+                <div style="display:grid;grid-template-columns:repeat(auto-fit,minmax(150px,1fr));gap:10px;margin:0 0 12px 0;">
+                  <div style="display:flex;align-items:center;gap:8px;padding:8px 10px;border:1px solid #e5e7eb;border-radius:12px;background:#eff6ff;"><span style="width:18px;height:18px;border-radius:999px;background:#BFDBFE;border:1px solid #4B5563;display:inline-block;"></span><span>Organization</span></div>
+                  <div style="display:flex;align-items:center;gap:8px;padding:8px 10px;border:1px solid #e5e7eb;border-radius:12px;background:#ecfeff;"><span style="width:18px;height:18px;background:#67E8F9;border:1px solid #4B5563;display:inline-block;clip-path:polygon(25% 0%,75% 0%,100% 50%,75% 100%,25% 100%,0% 50%);"></span><span>Team</span></div>
+                  <div style="display:flex;align-items:center;gap:8px;padding:8px 10px;border:1px solid #e5e7eb;border-radius:12px;background:#f0fdf4;"><span style="width:18px;height:18px;border-radius:4px;background:#86EFAC;border:1px solid #4B5563;display:inline-block;"></span><span>Project</span></div>
+                  <div style="display:flex;align-items:center;gap:8px;padding:8px 10px;border:1px solid #e5e7eb;border-radius:12px;background:#fdf2f8;"><span style="width:18px;height:18px;background:#F9A8D4;border:1px solid #4B5563;display:inline-block;clip-path:polygon(0 15%,80% 15%,80% 0,100% 50%,80% 100%,80% 85%,0 85%);"></span><span>Case</span></div>
+                  <div style="display:flex;align-items:center;gap:8px;padding:8px 10px;border:1px solid #e5e7eb;border-radius:12px;background:#fefce8;"><span style="width:18px;height:18px;background:#FDE68A;border:1px solid #4B5563;display:inline-block;clip-path:polygon(0 25%,65% 25%,65% 0,100% 50%,65% 100%,65% 75%,0 75%);"></span><span>Task</span></div>
+                  <div style="display:flex;align-items:center;gap:8px;padding:8px 10px;border:1px solid #e5e7eb;border-radius:12px;background:#fff1f2;"><span style="width:18px;height:18px;background:#FDA4AF;border:1px solid #4B5563;display:inline-block;transform:rotate(45deg);"></span><span>Decision</span></div>
+                  <div style="display:flex;align-items:center;gap:8px;padding:8px 10px;border:1px solid #e5e7eb;border-radius:12px;background:#f5f3ff;"><span style="width:18px;height:18px;border-radius:4px;background:#C4B5FD;border:1px solid #4B5563;display:inline-block;"></span><span>Event</span></div>
+                  <div style="display:flex;align-items:center;gap:8px;padding:8px 10px;border:1px solid #e5e7eb;border-radius:12px;background:#fff8e7;"><span style="width:18px;height:18px;background:#FFF8E7;border:1px solid #4B5563;display:inline-block;box-shadow:3px 3px 0 rgba(75,85,99,0.25);"></span><span>Person</span></div>
+                  <div style="display:flex;align-items:center;gap:8px;padding:8px 10px;border:1px solid #e5e7eb;border-radius:12px;background:#fafaf9;"><span style="width:18px;height:18px;background:#F5F5F4;border:1px solid #4B5563;display:inline-block;clip-path:polygon(0 0,100% 0,100% 78%,66% 78%,66% 100%,50% 78%,0 78%);"></span><span>Note</span></div>
+                  <div style="display:flex;align-items:center;gap:8px;padding:8px 10px;border:1px solid #e5e7eb;border-radius:12px;background:#f8fafc;"><span style="width:18px;height:18px;background:#CBD5E1;border:1px solid #4B5563;display:inline-block;clip-path:polygon(0 0,78% 0,78% 20%,100% 20%,100% 100%,0 100%);"></span><span>Source item</span></div>
+                </div>
+                """,
+                unsafe_allow_html=True,
+            )
             svg = render_mindmap_svg(records)
             if svg:
                 components.html(render_interactive_mindmap(svg), height=820, scrolling=False)
