@@ -5,6 +5,7 @@ import re
 import uuid
 from pathlib import Path
 
+from rag_assistant.history import append_event, build_event
 from rag_assistant.models import KnowledgeRecord, utc_now_iso
 
 
@@ -36,15 +37,6 @@ def save_records(path: Path, records: list[KnowledgeRecord]) -> None:
         "records": [record.to_dict() for record in records],
     }
     path.write_text(json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8")
-
-
-def delete_record(path: Path, record_id: str) -> bool:
-    records = load_records(path)
-    filtered = [record for record in records if record.record_id != record_id]
-    if len(filtered) == len(records):
-        return False
-    save_records(path, filtered)
-    return True
 
 
 def normalize_records(records: list[KnowledgeRecord]) -> tuple[list[KnowledgeRecord], int]:
@@ -93,25 +85,66 @@ def normalize_record_store(path: Path) -> int:
     return changed
 
 
-def upsert_record(path: Path, record: KnowledgeRecord) -> KnowledgeRecord:
-    records = load_records(path)
+def replace_records(path: Path, records: list[KnowledgeRecord], history_path: Path | None = None, source: str = "ui") -> list[KnowledgeRecord]:
+    existing_records = load_records(path)
+    existing_lookup = {record.record_id: record for record in existing_records}
     now = utc_now_iso()
-    updated = None
+    final_records: list[KnowledgeRecord] = []
+    seen_ids: set[str] = set()
 
-    for index, existing in enumerate(records):
-        if existing.record_id == record.record_id:
+    for record in records:
+        existing = existing_lookup.get(record.record_id)
+        if existing:
+            before = existing.to_dict()
             record.created_at = existing.created_at
+            if before != record.to_dict():
+                record.updated_at = now
+                if history_path is not None:
+                    append_event(history_path, build_event(record.record_id, before, record.to_dict(), source))
+            else:
+                record.updated_at = existing.updated_at
+        else:
+            record.created_at = record.created_at or now
             record.updated_at = now
-            records[index] = record
-            updated = record
-            break
+            if history_path is not None:
+                append_event(history_path, build_event(record.record_id, None, record.to_dict(), source))
+        final_records.append(record)
+        seen_ids.add(record.record_id)
 
-    if updated is None:
-        record.created_at = record.created_at or now
-        record.updated_at = now
-        records.append(record)
-        updated = record
+    for existing in existing_records:
+        if existing.record_id in seen_ids:
+            continue
+        if history_path is not None:
+            append_event(history_path, build_event(existing.record_id, existing.to_dict(), None, source))
 
-    records.sort(key=lambda item: item.updated_at, reverse=True)
-    save_records(path, records)
-    return updated
+    final_records.sort(key=lambda item: item.updated_at, reverse=True)
+    save_records(path, final_records)
+    return final_records
+
+
+def upsert_record(path: Path, record: KnowledgeRecord, history_path: Path | None = None, source: str = "ui") -> KnowledgeRecord:
+    existing_records = load_records(path)
+    lookup = {item.record_id: item for item in existing_records}
+    lookup[record.record_id] = record
+    final_records = [lookup[item.record_id] for item in existing_records if item.record_id in lookup and not lookup.pop(item.record_id, None)]
+    # rebuild in a stable way
+    merged: list[KnowledgeRecord] = []
+    seen: set[str] = set()
+    for item in existing_records + [record]:
+        candidate = record if item.record_id == record.record_id else item
+        if candidate.record_id in seen:
+            continue
+        seen.add(candidate.record_id)
+        merged.append(candidate)
+    replace_records(path, merged, history_path=history_path, source=source)
+    refreshed = load_records(path)
+    return next(item for item in refreshed if item.record_id == record.record_id)
+
+
+def delete_record(path: Path, record_id: str, history_path: Path | None = None, source: str = "ui") -> bool:
+    records = load_records(path)
+    filtered = [record for record in records if record.record_id != record_id]
+    if len(filtered) == len(records):
+        return False
+    replace_records(path, filtered, history_path=history_path, source=source)
+    return True

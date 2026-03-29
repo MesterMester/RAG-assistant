@@ -32,7 +32,7 @@ from rag_assistant.planning_layout import (
     remove_week,
     save_planning_layout,
 )
-from rag_assistant.records import build_record_id, delete_record, load_records, normalize_records, save_records, upsert_record
+from rag_assistant.records import build_record_id, delete_record, load_records, normalize_records, replace_records, save_records, upsert_record
 from rag_assistant.search import search_chunks
 from rag_assistant.vector_store import VectorStoreError, upsert_manual_records
 
@@ -392,8 +392,8 @@ def parse_optional_date(value: str | None) -> date | None:
     return date.fromisoformat(value)
 
 
-def persist_record(record: KnowledgeRecord, source_dir, config, records_path, index_path, chroma_dir) -> None:
-    saved = upsert_record(records_path, record)
+def persist_record(record: KnowledgeRecord, source_dir, config, records_path, index_path, chroma_dir, history_path) -> None:
+    saved = upsert_record(records_path, record, history_path=history_path, source="ui")
     st.session_state["selected_record_id"] = saved.record_id
     refreshed_records = load_records(records_path)
     chunks = build_index(source_dir, config)
@@ -449,8 +449,8 @@ def normalize_table_value(value) -> str:
     return str(value).strip()
 
 
-def persist_records_bulk(records: list[KnowledgeRecord], source_dir, config, records_path, index_path, chroma_dir, success_message: str) -> None:
-    save_records(records_path, records)
+def persist_records_bulk(records: list[KnowledgeRecord], source_dir, config, records_path, index_path, chroma_dir, history_path, success_message: str) -> None:
+    replace_records(records_path, records, history_path=history_path, source="ui")
     refreshed_records = load_records(records_path)
     chunks = build_index(source_dir, config)
     save_index(index_path, chunks)
@@ -1520,6 +1520,7 @@ def app() -> None:
     index_path = config.index_path_for(source_dir)
     chroma_dir = config.chroma_dir_for(source_dir)
     planning_layout_path = config.planning_layout_path_for(source_dir)
+    history_events_path = config.history_events_path_for(source_dir)
     records = load_records(records_path)
     planning_layout = ensure_layout(planning_layout_path)
     planning_titles = planning_bucket_titles(planning_layout)
@@ -1536,6 +1537,7 @@ def app() -> None:
     st.sidebar.write(f"Keyword index: `{index_path}`")
     st.sidebar.write(f"Chroma: `{chroma_dir}`")
     st.sidebar.write(f"Planning layout: `{planning_layout_path}`")
+    st.sidebar.write(f"History log: `{history_events_path}`")
     if selected_record:
         st.sidebar.subheader("Kivalasztott rekord")
         st.sidebar.write(record_label(selected_record))
@@ -1580,7 +1582,7 @@ def app() -> None:
                     planning_bucket=create_values["planning_bucket"],
                     focus_rank=create_values["focus_rank"],
                 )
-                persist_record(record, source_dir, config, records_path, index_path, chroma_dir)
+                persist_record(record, source_dir, config, records_path, index_path, chroma_dir, history_events_path)
 
     with tab_detail:
         st.subheader("Rekord reszlet es szerkesztes")
@@ -1639,7 +1641,7 @@ def app() -> None:
                     planning_bucket=edit_values["planning_bucket"],
                     focus_rank=edit_values["focus_rank"],
                 )
-                persist_record(updated_record, source_dir, config, records_path, index_path, chroma_dir)
+                persist_record(updated_record, source_dir, config, records_path, index_path, chroma_dir, history_events_path)
 
     with tab_table:
         st.subheader("Tablazat nezet")
@@ -1807,6 +1809,7 @@ def app() -> None:
                                 records_path,
                                 index_path,
                                 chroma_dir,
+                                history_events_path,
                                 f"Tablazat valtozasai mentve: {changed_count} rekord.",
                             )
 
@@ -1818,7 +1821,7 @@ def app() -> None:
                         key="table_delete_picker",
                     )
                     if st.button("Kijelolt rekord torlese", key="delete_from_table"):
-                        removed = delete_record(records_path, delete_id)
+                        removed = delete_record(records_path, delete_id, history_path=history_events_path, source="ui")
                         if not removed:
                             st.warning("A rekord mar nem talalhato.")
                         else:
@@ -1830,6 +1833,7 @@ def app() -> None:
                                 records_path,
                                 index_path,
                                 chroma_dir,
+                                history_events_path,
                                 "Rekord torolve a tablazatnezetbol.",
                             )
 
@@ -1873,7 +1877,7 @@ def app() -> None:
                 new_status = str(kanban_result.get("status", "")).strip()
                 moved_record = next((record for record in task_like if record.record_id == record_id), None)
                 if moved_record and new_status and new_status != moved_record.status:
-                    persist_record(update_record(moved_record, status=new_status), source_dir, config, records_path, index_path, chroma_dir)
+                    persist_record(update_record(moved_record, status=new_status), source_dir, config, records_path, index_path, chroma_dir, history_events_path)
 
     with tab_timeline:
         st.subheader("Timeline nezet")
@@ -1918,7 +1922,7 @@ def app() -> None:
                         deadline=(new_date.isoformat() if isinstance(new_date, date) else None) if record.deadline and not record.due_at and not record.event_at else record.deadline,
                         event_at=(new_date.isoformat() if isinstance(new_date, date) else None) if record.event_at else None,
                     )
-                    persist_record(updated_record, source_dir, config, records_path, index_path, chroma_dir)
+                    persist_record(updated_record, source_dir, config, records_path, index_path, chroma_dir, history_events_path)
                 if st.button("Megnyit", key=f"open_timeline_{record.record_id}"):
                     st.session_state["selected_record_id"] = record.record_id
                     st.rerun()
@@ -2095,7 +2099,7 @@ def app() -> None:
                                         planning_bucket=edit_values["planning_bucket"],
                                         focus_rank=edit_values["focus_rank"],
                                     )
-                                    persist_record(with_synced_hierarchy_title(updated_record), source_dir, config, records_path, index_path, chroma_dir)
+                                    persist_record(with_synced_hierarchy_title(updated_record), source_dir, config, records_path, index_path, chroma_dir, history_events_path)
                                 if action_col2.button("Add child", key="add_child_context_graph"):
                                     child_record = KnowledgeRecord(
                                         record_id=build_record_id("Uj child"),
@@ -2112,7 +2116,7 @@ def app() -> None:
                                         parent_id=selected_record.record_id,
                                     )
                                     st.session_state["context_graph_selected_record_id"] = child_record.record_id
-                                    persist_record(child_record, source_dir, config, records_path, index_path, chroma_dir)
+                                    persist_record(child_record, source_dir, config, records_path, index_path, chroma_dir, history_events_path)
                                 if action_col3.button("Reszlet", key="open_from_context_graph"):
                                     st.session_state["selected_record_id"] = selected_record.record_id
                                     st.rerun()
