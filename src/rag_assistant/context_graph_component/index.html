@@ -134,6 +134,12 @@
       .node.selected {
         box-shadow: 0 0 0 3px rgba(15, 23, 42, 0.12), 0 12px 24px rgba(15, 23, 42, 0.12);
       }
+      .node.dragging {
+        opacity: 0.45;
+      }
+      .node.drop-target {
+        box-shadow: 0 0 0 3px rgba(37, 99, 235, 0.22), 0 12px 24px rgba(15, 23, 42, 0.16);
+      }
       .node.circle {
         border-radius: 999px;
         padding-left: 18px;
@@ -498,6 +504,12 @@
         render(payload);
       }
 
+      function persistViewport(viewport) {
+        if (!viewport) return;
+        sessionStorage.setItem(storageKey("scroll_left"), String(viewport.scrollLeft));
+        sessionStorage.setItem(storageKey("scroll_top"), String(viewport.scrollTop));
+      }
+
       function render(payload) {
         const app = document.getElementById("app");
         try {
@@ -568,6 +580,7 @@
           `;
 
           const viewport = app.querySelector(".viewport");
+          let dragRecordId = null;
           app.querySelectorAll("[data-action]").forEach(button => {
             button.addEventListener("click", () => {
               const action = button.dataset.action || "";
@@ -584,9 +597,42 @@
           app.querySelectorAll("[data-node-id]").forEach(nodeEl => {
             nodeEl.addEventListener("click", () => {
               if (nodeEl.dataset.selectable !== "true") return;
+              persistViewport(viewport);
               const recordId = nodeEl.dataset.nodeId || "";
               if (recordId) sendEvent({ action: "select_node", record_id: recordId });
             });
+            if (nodeEl.dataset.selectable === "true") {
+              nodeEl.setAttribute("draggable", "true");
+              nodeEl.addEventListener("dragstart", event => {
+                dragRecordId = nodeEl.dataset.nodeId || "";
+                nodeEl.classList.add("dragging");
+                event.dataTransfer.setData("text/plain", dragRecordId || "");
+                event.dataTransfer.effectAllowed = "move";
+                persistViewport(viewport);
+              });
+              nodeEl.addEventListener("dragend", () => {
+                dragRecordId = null;
+                nodeEl.classList.remove("dragging");
+                app.querySelectorAll(".drop-target").forEach(target => target.classList.remove("drop-target"));
+              });
+              nodeEl.addEventListener("dragover", event => {
+                const targetId = nodeEl.dataset.nodeId || "";
+                if (!dragRecordId || !targetId || dragRecordId === targetId) return;
+                event.preventDefault();
+                nodeEl.classList.add("drop-target");
+                event.dataTransfer.dropEffect = "move";
+              });
+              nodeEl.addEventListener("dragleave", () => nodeEl.classList.remove("drop-target"));
+              nodeEl.addEventListener("drop", event => {
+                const targetId = nodeEl.dataset.nodeId || "";
+                const sourceId = dragRecordId || event.dataTransfer.getData("text/plain");
+                nodeEl.classList.remove("drop-target");
+                if (!sourceId || !targetId || sourceId === targetId) return;
+                event.preventDefault();
+                persistViewport(viewport);
+                sendEvent({ action: "reparent_node", record_id: sourceId, target_record_id: targetId });
+              });
+            }
           });
 
           if (viewport) {
@@ -597,8 +643,7 @@
             viewport.scrollLeft = Math.min(maxScrollLeft, Math.max(0, readNumberStorage(storageKey("scroll_left"), defaultLeft)));
             viewport.scrollTop = Math.min(maxScrollTop, Math.max(0, readNumberStorage(storageKey("scroll_top"), defaultTop)));
             viewport.addEventListener("scroll", () => {
-              sessionStorage.setItem(storageKey("scroll_left"), String(viewport.scrollLeft));
-              sessionStorage.setItem(storageKey("scroll_top"), String(viewport.scrollTop));
+              persistViewport(viewport);
             });
 
             let dragging = false;

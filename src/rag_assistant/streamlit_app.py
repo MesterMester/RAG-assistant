@@ -601,6 +601,83 @@ def infer_parent_from_hierarchy(
     )
 
 
+def is_descendant(records: list[KnowledgeRecord], ancestor_id: str, candidate_id: str) -> bool:
+    children_by_parent: dict[str, list[str]] = {}
+    for record in records:
+        if record.parent_id:
+            children_by_parent.setdefault(record.parent_id, []).append(record.record_id)
+    queue = list(children_by_parent.get(ancestor_id, []))
+    visited: set[str] = set()
+    while queue:
+        current = queue.pop(0)
+        if current in visited:
+            continue
+        visited.add(current)
+        if current == candidate_id:
+            return True
+        queue.extend(children_by_parent.get(current, []))
+    return False
+
+
+def reparent_subtree(records: list[KnowledgeRecord], moved_id: str, new_parent_id: str) -> list[KnowledgeRecord]:
+    lookup = {record.record_id: record for record in records}
+    moved_record = lookup.get(moved_id)
+    new_parent = lookup.get(new_parent_id)
+    if not moved_record or not new_parent:
+        return records
+
+    children_by_parent: dict[str, list[str]] = {}
+    for record in records:
+        if record.parent_id:
+            children_by_parent.setdefault(record.parent_id, []).append(record.record_id)
+
+    def apply_under_parent(record: KnowledgeRecord, parent_record: KnowledgeRecord | None) -> KnowledgeRecord:
+        parent_hierarchy = hierarchy_from_record(parent_record) if parent_record else {"organization": "", "team": "", "project": "", "case_name": ""}
+        changes: dict[str, str] = {}
+        if record.entity_type == "organization":
+            changes["organization"] = record.title
+            changes["team"] = ""
+            changes["project"] = ""
+            changes["case_name"] = ""
+        elif record.entity_type == "team":
+            changes["organization"] = parent_hierarchy["organization"]
+            changes["team"] = record.title
+            changes["project"] = ""
+            changes["case_name"] = ""
+        elif record.entity_type == "project":
+            changes["organization"] = parent_hierarchy["organization"]
+            changes["team"] = parent_hierarchy["team"]
+            changes["project"] = record.title
+            changes["case_name"] = ""
+        elif record.entity_type == "case":
+            changes["organization"] = parent_hierarchy["organization"]
+            changes["team"] = parent_hierarchy["team"]
+            changes["project"] = parent_hierarchy["project"]
+            changes["case_name"] = record.title
+        else:
+            changes["organization"] = parent_hierarchy["organization"]
+            changes["team"] = parent_hierarchy["team"]
+            changes["project"] = parent_hierarchy["project"]
+            changes["case_name"] = parent_hierarchy["case_name"]
+        return with_synced_hierarchy_title(update_record(record, **changes, updated_at=utc_now_iso()))
+
+    updated_lookup = {record.record_id: record for record in records}
+    updated_lookup[moved_id] = apply_under_parent(update_record(moved_record, parent_id=new_parent_id, updated_at=utc_now_iso()), new_parent)
+
+    queue = list(children_by_parent.get(moved_id, []))
+    while queue:
+        child_id = queue.pop(0)
+        child_record = updated_lookup.get(child_id)
+        if not child_record:
+            continue
+        parent_record = updated_lookup.get(child_record.parent_id)
+        updated_lookup[child_id] = apply_under_parent(child_record, parent_record)
+        queue.extend(children_by_parent.get(child_id, []))
+
+    merged_records = [updated_lookup.get(record.record_id, record) for record in records]
+    return sync_hierarchy_renames(merged_records, lookup)
+
+
 def hierarchy_fields_for(entity_type: str) -> list[str]:
     mapping = {
         "organization": ["organization"],
@@ -1927,71 +2004,118 @@ def app() -> None:
 
                 graph_col, editor_col = st.columns([2.2, 1.1])
                 with graph_col:
-                    graph_payload = build_context_graph_payload(
-                        visible_graph_records,
-                        selected_record_id,
-                        show_relations,
-                        show_only_hierarchy,
-                        graph_mode,
-                    )
-                    graph_result = context_graph(graph_payload, key="context_graph_surface")
-                    if isinstance(graph_result, dict) and graph_result.get("action") == "select_node":
-                        event_id = str(graph_result.get("event_id", "")).strip()
-                        if not event_id or st.session_state.get("last_context_graph_event") != event_id:
-                            if event_id:
-                                st.session_state["last_context_graph_event"] = event_id
-                            record_id = str(graph_result.get("record_id", "")).strip()
-                            if record_id and record_id in {record.record_id for record in records}:
-                                st.session_state["context_graph_selected_record_id"] = record_id
-                                st.rerun()
+                    graph_box = st.container(height=860, border=False)
+                    with graph_box:
+                        graph_payload = build_context_graph_payload(
+                            visible_graph_records,
+                            selected_record_id,
+                            show_relations,
+                            show_only_hierarchy,
+                            graph_mode,
+                        )
+                        graph_result = context_graph(graph_payload, key="context_graph_surface")
+                        if isinstance(graph_result, dict) and graph_result.get("action") in {"select_node", "reparent_node"}:
+                            event_id = str(graph_result.get("event_id", "")).strip()
+                            if not event_id or st.session_state.get("last_context_graph_event") != event_id:
+                                if event_id:
+                                    st.session_state["last_context_graph_event"] = event_id
+                                if graph_result.get("action") == "select_node":
+                                    record_id = str(graph_result.get("record_id", "")).strip()
+                                    if record_id and record_id in {record.record_id for record in records}:
+                                        st.session_state["context_graph_selected_record_id"] = record_id
+                                        st.rerun()
+                                if graph_result.get("action") == "reparent_node":
+                                    moved_id = str(graph_result.get("record_id", "")).strip()
+                                    new_parent_id = str(graph_result.get("target_record_id", "")).strip()
+                                    if (
+                                        moved_id
+                                        and new_parent_id
+                                        and moved_id != new_parent_id
+                                        and moved_id in {record.record_id for record in records}
+                                        and new_parent_id in {record.record_id for record in records}
+                                        and not is_descendant(records, moved_id, new_parent_id)
+                                    ):
+                                        st.session_state["context_graph_selected_record_id"] = moved_id
+                                        updated_records = reparent_subtree(records, moved_id, new_parent_id)
+                                        persist_records_bulk(
+                                            updated_records,
+                                            source_dir,
+                                            config,
+                                            records_path,
+                                            index_path,
+                                            chroma_dir,
+                                            "Context Graph hierarchia frissitve.",
+                                        )
 
                 with editor_col:
                     selected_record = next((record for record in records if record.record_id == st.session_state.get("context_graph_selected_record_id")), None)
-                    if selected_record is None:
-                        st.info("Valassz ki egy rekordot a grafon.")
-                    else:
-                        st.caption(f"Kijelolt rekord: {record_label(selected_record)}")
-                        edit_values = render_record_editor(
-                            f"context_graph_edit_{selected_record.record_id}",
-                            records,
-                            existing_values,
-                            planning_options,
-                            planning_titles,
-                            base_record=selected_record,
-                            allow_parent_edit=False,
-                        )
-                        if st.button("Context Graph rekord mentese", key="save_context_graph_record"):
-                            updated_record = update_record(
-                                selected_record,
-                                title=edit_values["title"],
-                                summary=edit_values["summary"],
-                                content=edit_values["content"],
-                                entity_type=edit_values["entity_type"],
-                                status=edit_values["status"],
-                                organization=edit_values["organization"],
-                                team=edit_values["team"],
-                                project=edit_values["project"],
-                                case_name=edit_values["case_name"],
-                                parent_id=edit_values["parent_id"],
-                                related_people=edit_values["related_people"],
-                                tags=edit_values["tags"],
-                                relations=edit_values["relations"],
-                                decision_needed=edit_values["decision_needed"],
-                                decision_context=edit_values["decision_context"],
-                                start_at=edit_values["start_at"],
-                                due_at=edit_values["due_at"],
-                                deadline=edit_values["deadline"],
-                                event_at=edit_values["event_at"],
-                                next_step=edit_values["next_step"],
-                                next_step_estimate=edit_values["next_step_estimate"],
-                                next_steps=edit_values["next_steps"],
-                                planning_bucket=edit_values["planning_bucket"],
-                                focus_rank=edit_values["focus_rank"],
+                    editor_box = st.container(height=860, border=False)
+                    with editor_box:
+                        if selected_record is None:
+                            st.info("Valassz ki egy rekordot a grafon.")
+                        else:
+                            st.caption(f"Kijelolt rekord: {record_label(selected_record)}")
+                            action_placeholder = st.empty()
+                            edit_values = render_record_editor(
+                                f"context_graph_edit_{selected_record.record_id}",
+                                records,
+                                existing_values,
+                                planning_options,
+                                planning_titles,
+                                base_record=selected_record,
+                                allow_parent_edit=False,
                             )
-                            persist_record(with_synced_hierarchy_title(updated_record), source_dir, config, records_path, index_path, chroma_dir)
-                        if st.button("Megnyit a reszletnezetben", key="open_from_context_graph"):
-                            st.session_state["selected_record_id"] = selected_record.record_id
-                            st.rerun()
+                            with action_placeholder.container():
+                                action_col1, action_col2, action_col3 = st.columns(3)
+                                if action_col1.button("Mentés", key="save_context_graph_record"):
+                                    updated_record = update_record(
+                                        selected_record,
+                                        title=edit_values["title"],
+                                        summary=edit_values["summary"],
+                                        content=edit_values["content"],
+                                        entity_type=edit_values["entity_type"],
+                                        status=edit_values["status"],
+                                        organization=edit_values["organization"],
+                                        team=edit_values["team"],
+                                        project=edit_values["project"],
+                                        case_name=edit_values["case_name"],
+                                        parent_id=edit_values["parent_id"],
+                                        related_people=edit_values["related_people"],
+                                        tags=edit_values["tags"],
+                                        relations=edit_values["relations"],
+                                        decision_needed=edit_values["decision_needed"],
+                                        decision_context=edit_values["decision_context"],
+                                        start_at=edit_values["start_at"],
+                                        due_at=edit_values["due_at"],
+                                        deadline=edit_values["deadline"],
+                                        event_at=edit_values["event_at"],
+                                        next_step=edit_values["next_step"],
+                                        next_step_estimate=edit_values["next_step_estimate"],
+                                        next_steps=edit_values["next_steps"],
+                                        planning_bucket=edit_values["planning_bucket"],
+                                        focus_rank=edit_values["focus_rank"],
+                                    )
+                                    persist_record(with_synced_hierarchy_title(updated_record), source_dir, config, records_path, index_path, chroma_dir)
+                                if action_col2.button("Add child", key="add_child_context_graph"):
+                                    child_record = KnowledgeRecord(
+                                        record_id=build_record_id("Uj child"),
+                                        title="Uj child",
+                                        summary="",
+                                        content="",
+                                        source_type="manual",
+                                        entity_type="note",
+                                        status="inbox",
+                                        organization=selected_record.organization,
+                                        team=selected_record.team,
+                                        project=selected_record.project,
+                                        case_name=selected_record.case_name,
+                                        parent_id=selected_record.record_id,
+                                    )
+                                    st.session_state["context_graph_selected_record_id"] = child_record.record_id
+                                    persist_record(child_record, source_dir, config, records_path, index_path, chroma_dir)
+                                if action_col3.button("Reszlet", key="open_from_context_graph"):
+                                    st.session_state["selected_record_id"] = selected_record.record_id
+                                    st.rerun()
 
                 st.caption("Phase A: szurheto, kattinthato es ugyanazon a tabon szerkesztheto Context Graph. A teljes vizualis edge-szerkesztes es a kulon Graph nezet a kovetkezo fazisba tartozik.")
 
