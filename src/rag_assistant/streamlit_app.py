@@ -542,6 +542,65 @@ def apply_parent_hierarchy(records: list[KnowledgeRecord], parent_id: str, hiera
     return hierarchy_values
 
 
+def infer_parent_from_hierarchy(
+    records: list[KnowledgeRecord],
+    entity_type: str,
+    hierarchy_values: dict[str, str],
+    current_record_id: str = "",
+) -> str:
+    if entity_type == "organization":
+        return ""
+
+    organization = hierarchy_values.get("organization", "").strip()
+    team = hierarchy_values.get("team", "").strip()
+    project = hierarchy_values.get("project", "").strip()
+    case_name = hierarchy_values.get("case_name", "").strip()
+
+    def match(predicate) -> str:
+        for record in records:
+            if current_record_id and record.record_id == current_record_id:
+                continue
+            if predicate(record):
+                return record.record_id
+        return ""
+
+    if entity_type == "team":
+        return match(lambda record: record.entity_type == "organization" and (record.organization or record.title) == organization)
+    if entity_type == "project":
+        return (
+            match(lambda record: record.entity_type == "team" and record.organization == organization and (record.team or record.title) == team)
+            or match(lambda record: record.entity_type == "organization" and (record.organization or record.title) == organization)
+        )
+    if entity_type == "case":
+        return (
+            match(
+                lambda record: record.entity_type == "project"
+                and record.organization == organization
+                and record.team == team
+                and (record.project or record.title) == project
+            )
+            or match(lambda record: record.entity_type == "team" and record.organization == organization and (record.team or record.title) == team)
+            or match(lambda record: record.entity_type == "organization" and (record.organization or record.title) == organization)
+        )
+    return (
+        match(
+            lambda record: record.entity_type == "case"
+            and record.organization == organization
+            and record.team == team
+            and record.project == project
+            and (record.case_name or record.title) == case_name
+        )
+        or match(
+            lambda record: record.entity_type == "project"
+            and record.organization == organization
+            and record.team == team
+            and (record.project or record.title) == project
+        )
+        or match(lambda record: record.entity_type == "team" and record.organization == organization and (record.team or record.title) == team)
+        or match(lambda record: record.entity_type == "organization" and (record.organization or record.title) == organization)
+    )
+
+
 def hierarchy_fields_for(entity_type: str) -> list[str]:
     mapping = {
         "organization": ["organization"],
@@ -625,6 +684,7 @@ def render_record_editor(
     planning_options: list[str],
     planning_titles: dict[str, str],
     base_record: KnowledgeRecord | None = None,
+    allow_parent_edit: bool = True,
 ) -> dict:
     record = base_record or KnowledgeRecord(
         record_id="",
@@ -647,7 +707,7 @@ def render_record_editor(
 
     show_status = entity_type not in {"organization", "team", "person"}
     show_people = entity_type in {"organization", "team", "project", "case", "task", "event", "note", "source_item", "decision"}
-    show_parent = entity_type not in {"organization"}
+    show_parent = allow_parent_edit and entity_type not in {"organization"}
     show_schedule = entity_type in {"task", "case", "project", "decision", "note", "source_item"}
     show_event = entity_type == "event"
     show_decision = entity_type in {"project", "case", "task", "decision", "note", "source_item"}
@@ -717,6 +777,9 @@ def render_record_editor(
             else:
                 st.caption(f"{field_labels[field_name]}: nem relevans ehhez az entitashoz")
                 hierarchy_values[field_name] = ""
+
+    if not allow_parent_edit:
+        parent_id = infer_parent_from_hierarchy(records, entity_type, hierarchy_values, record.record_id)
 
     summary = st.text_area("Rovid osszefoglalo", value=record.summary, height=100, key=f"{key_prefix}_summary")
     content = st.text_area("Reszletes tartalom", value=record.content, height=220, key=f"{key_prefix}_content")
@@ -984,7 +1047,23 @@ def filter_context_graph_records(
     return filtered
 
 
-def build_context_graph_payload(records: list[KnowledgeRecord], selected_node_id: str, show_relations: bool, show_only_hierarchy: bool) -> dict:
+def expand_context_graph_with_ancestors(records: list[KnowledgeRecord], base_records: list[KnowledgeRecord]) -> list[KnowledgeRecord]:
+    lookup = {record.record_id: record for record in records}
+    selected: dict[str, KnowledgeRecord] = {record.record_id: record for record in base_records}
+    queue = [record.record_id for record in base_records]
+    while queue:
+        record_id = queue.pop(0)
+        record = lookup.get(record_id)
+        if not record or not record.parent_id:
+            continue
+        parent = lookup.get(record.parent_id)
+        if parent and parent.record_id not in selected:
+            selected[parent.record_id] = parent
+            queue.append(parent.record_id)
+    return list(selected.values())
+
+
+def build_context_graph_payload(records: list[KnowledgeRecord], selected_node_id: str, show_relations: bool, show_only_hierarchy: bool, mode: str) -> dict:
     filtered_lookup = {record.record_id: record for record in records}
     hierarchy_lookup: dict[str, str] = {}
     nodes: dict[str, dict] = {}
@@ -1083,7 +1162,7 @@ def build_context_graph_payload(records: list[KnowledgeRecord], selected_node_id
                     add_edge(record.record_id, relation_id, "relation")
 
     return {
-        "mode": "mindmap",
+        "mode": mode,
         "selected_node_id": selected_node_id,
         "nodes": list(nodes.values()),
         "edges": [edge for edge in edges if not show_only_hierarchy or edge["kind"] == "hierarchy"],
@@ -1818,6 +1897,12 @@ def app() -> None:
             toggle_col1, toggle_col2 = st.columns(2)
             show_relations = toggle_col1.checkbox("Relaciok mutatasa", value=st.session_state.get("context_graph_show_relations", True), key="context_graph_show_relations")
             show_only_hierarchy = toggle_col2.checkbox("Csak hierarchia", value=st.session_state.get("context_graph_only_hierarchy", False), key="context_graph_only_hierarchy")
+            graph_mode = st.selectbox(
+                "Nezet",
+                options=["branch_right", "radial"],
+                format_func=lambda value: {"branch_right": "Jobb fele agszerkezet", "radial": "Radial"}.get(value, value),
+                key="context_graph_mode",
+            )
 
             filtered_graph_records = filter_context_graph_records(
                 records,
@@ -1829,23 +1914,25 @@ def app() -> None:
                 context_due_from,
                 context_due_to,
             )
+            visible_graph_records = expand_context_graph_with_ancestors(records, filtered_graph_records)
 
             if not filtered_graph_records:
                 st.info("A szurok mellett nincs megjelenitheto rekord.")
             else:
                 selected_record_id = st.session_state.get("context_graph_selected_record_id")
-                filtered_ids = {record.record_id for record in filtered_graph_records}
-                if selected_record_id not in filtered_ids:
+                visible_ids = {record.record_id for record in visible_graph_records}
+                if selected_record_id not in visible_ids:
                     selected_record_id = filtered_graph_records[0].record_id
                     st.session_state["context_graph_selected_record_id"] = selected_record_id
 
                 graph_col, editor_col = st.columns([2.2, 1.1])
                 with graph_col:
                     graph_payload = build_context_graph_payload(
-                        filtered_graph_records,
+                        visible_graph_records,
                         selected_record_id,
                         show_relations,
                         show_only_hierarchy,
+                        graph_mode,
                     )
                     graph_result = context_graph(graph_payload, key="context_graph_surface")
                     if isinstance(graph_result, dict) and graph_result.get("action") == "select_node":
@@ -1865,12 +1952,13 @@ def app() -> None:
                     else:
                         st.caption(f"Kijelolt rekord: {record_label(selected_record)}")
                         edit_values = render_record_editor(
-                            "context_graph_edit",
+                            f"context_graph_edit_{selected_record.record_id}",
                             records,
                             existing_values,
                             planning_options,
                             planning_titles,
                             base_record=selected_record,
+                            allow_parent_edit=False,
                         )
                         if st.button("Context Graph rekord mentese", key="save_context_graph_record"):
                             updated_record = update_record(

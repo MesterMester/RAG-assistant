@@ -7,8 +7,6 @@
     <style>
       :root {
         color-scheme: light;
-        --bg: #fffdf8;
-        --panel: rgba(255, 255, 255, 0.92);
         --line: #dbe4ee;
         --text: #0f172a;
         --muted: #64748b;
@@ -33,12 +31,42 @@
         gap: 12px;
       }
       .note {
+        display: flex;
+        align-items: center;
+        justify-content: space-between;
+        gap: 12px;
         padding: 10px 14px;
         border: 1px solid var(--line);
         border-radius: 18px;
-        background: var(--panel);
+        background: rgba(255,255,255,0.92);
         font-size: 13px;
         color: var(--muted);
+      }
+      .note-actions {
+        display: flex;
+        gap: 8px;
+        flex-wrap: wrap;
+      }
+      .mini-btn {
+        appearance: none;
+        border: 1px solid #cbd5e1;
+        background: white;
+        border-radius: 999px;
+        min-width: 34px;
+        height: 30px;
+        padding: 0 12px;
+        cursor: pointer;
+        color: #334155;
+        font-weight: 700;
+      }
+      .error-box {
+        padding: 14px 16px;
+        border: 1px solid #fecaca;
+        border-radius: 18px;
+        background: #fff1f2;
+        color: #991b1b;
+        font-size: 13px;
+        white-space: pre-wrap;
       }
       .shell {
         flex: 1 1 auto;
@@ -54,11 +82,20 @@
         height: 100%;
         overflow: auto;
         position: relative;
+        cursor: grab;
       }
-      .canvas {
+      .viewport.dragging { cursor: grabbing; }
+      .canvas-shell {
         position: relative;
         min-width: 100%;
         min-height: 100%;
+      }
+      .scene {
+        position: absolute;
+        transform-origin: top left;
+      }
+      .canvas {
+        position: relative;
       }
       svg.edges {
         position: absolute;
@@ -68,27 +105,59 @@
         pointer-events: none;
         overflow: visible;
       }
-      .nodes {
-        position: relative;
-        min-height: 100%;
-      }
       .node {
         position: absolute;
         width: 180px;
         min-height: 74px;
         padding: 10px 12px;
         border-radius: 18px;
-        background: rgba(255,255,255,0.96);
+        background: linear-gradient(180deg, rgba(255,255,255,0.98), rgba(255,255,255,0.88));
         border: 1px solid var(--accent, #cbd5e1);
         box-shadow: 0 10px 20px rgba(15, 23, 42, 0.08);
         cursor: pointer;
+        overflow: hidden;
+      }
+      .node::before {
+        content: "";
+        position: absolute;
+        inset: 0;
+        background: linear-gradient(135deg, rgba(255,255,255,0.18), var(--accent-soft, rgba(203, 213, 225, 0.24)));
+        pointer-events: none;
+      }
+      .node > * {
+        position: relative;
+        z-index: 1;
       }
       .node.synthetic {
         opacity: 0.88;
       }
       .node.selected {
         box-shadow: 0 0 0 3px rgba(15, 23, 42, 0.12), 0 12px 24px rgba(15, 23, 42, 0.12);
-        transform: translateY(-1px);
+      }
+      .node.circle {
+        border-radius: 999px;
+        padding-left: 18px;
+        padding-right: 18px;
+      }
+      .node.hex {
+        clip-path: polygon(8% 0%, 92% 0%, 100% 50%, 92% 100%, 8% 100%, 0% 50%);
+        padding-left: 18px;
+        padding-right: 18px;
+      }
+      .node.arrow {
+        clip-path: polygon(0 0, 82% 0, 100% 50%, 82% 100%, 0 100%, 8% 50%);
+        padding-right: 22px;
+      }
+      .node.note {
+        clip-path: polygon(0 0, 100% 0, 100% 78%, 70% 78%, 70% 100%, 54% 78%, 0 78%);
+        padding-bottom: 18px;
+      }
+      .node.tab {
+        clip-path: polygon(0 0, 74% 0, 80% 16%, 100% 16%, 100% 100%, 0 100%);
+        padding-top: 14px;
+      }
+      .node.diamond {
+        clip-path: polygon(9% 0%, 91% 0%, 100% 50%, 91% 100%, 9% 100%, 0% 50%);
       }
       .node-title {
         font-weight: 700;
@@ -119,18 +188,10 @@
       }
       .shape.circle { border-radius: 999px; }
       .shape.diamond { transform: rotate(45deg); }
-      .shape.hex {
-        clip-path: polygon(25% 0%,75% 0%,100% 50%,75% 100%,25% 100%,0% 50%);
-      }
-      .shape.arrow {
-        clip-path: polygon(0 22%,68% 22%,68% 0,100% 50%,68% 100%,68% 78%,0 78%);
-      }
-      .shape.note {
-        clip-path: polygon(0 0,100% 0,100% 78%,66% 78%,66% 100%,50% 78%,0 78%);
-      }
-      .shape.tab {
-        clip-path: polygon(0 0,78% 0,78% 20%,100% 20%,100% 100%,0 100%);
-      }
+      .shape.hex { clip-path: polygon(25% 0%,75% 0%,100% 50%,75% 100%,25% 100%,0% 50%); }
+      .shape.arrow { clip-path: polygon(0 22%,68% 22%,68% 0,100% 50%,68% 100%,68% 78%,0 78%); }
+      .shape.note { clip-path: polygon(0 0,100% 0,100% 78%,66% 78%,66% 100%,50% 78%,0 78%); }
+      .shape.tab { clip-path: polygon(0 0,78% 0,78% 20%,100% 20%,100% 100%,0 100%); }
       .edge-hierarchy {
         stroke: rgba(71, 85, 105, 0.55);
         stroke-width: 2;
@@ -204,6 +265,15 @@
         });
       }
 
+      function storageKey(suffix) {
+        return `context_graph_${suffix}`;
+      }
+
+      function readNumberStorage(key, fallback) {
+        const parsed = Number(sessionStorage.getItem(key));
+        return Number.isFinite(parsed) ? parsed : fallback;
+      }
+
       function escapeHtml(value) {
         return String(value ?? "")
           .replaceAll("&", "&amp;")
@@ -213,7 +283,7 @@
           .replaceAll("'", "&#039;");
       }
 
-      function computeLayout(payload) {
+      function computeMindmapLayout(payload) {
         const nodes = payload.nodes || [];
         const edges = payload.edges || [];
         const hierarchyEdges = edges.filter(edge => edge.kind === "hierarchy");
@@ -232,35 +302,6 @@
           .filter(node => (incoming.get(node.id) || []).length === 0)
           .sort((a, b) => String(a.label || "").localeCompare(String(b.label || "")));
 
-        const levelById = new Map();
-        const queue = roots.map(node => ({ id: node.id, level: 0 }));
-        while (queue.length) {
-          const item = queue.shift();
-          if (!item) break;
-          const known = levelById.get(item.id);
-          if (known != null && known <= item.level) continue;
-          levelById.set(item.id, item.level);
-          (outgoing.get(item.id) || []).forEach(target => queue.push({ id: target, level: item.level + 1 }));
-        }
-        nodes.forEach(node => {
-          if (!levelById.has(node.id)) levelById.set(node.id, 0);
-        });
-
-        const columns = new Map();
-        nodes.forEach(node => {
-          const level = levelById.get(node.id) || 0;
-          if (!columns.has(level)) columns.set(level, []);
-          columns.get(level).push(node);
-        });
-
-        Array.from(columns.values()).forEach(column => {
-          column.sort((a, b) => {
-            const aGroup = `${a.project || ""}/${a.case_name || ""}/${a.label || ""}`;
-            const bGroup = `${b.project || ""}/${b.case_name || ""}/${b.label || ""}`;
-            return aGroup.localeCompare(bGroup);
-          });
-        });
-
         const positions = new Map();
         const nodeWidth = 180;
         const nodeHeight = 92;
@@ -268,22 +309,171 @@
         const rowGap = 44;
         const marginX = 36;
         const marginY = 24;
+        const levelById = new Map();
+        const visited = new Set();
+
+        function sortedChildren(nodeId) {
+          return (outgoing.get(nodeId) || [])
+            .slice()
+            .sort((leftId, rightId) => {
+              const left = nodes.find(node => node.id === leftId);
+              const right = nodes.find(node => node.id === rightId);
+              const leftKey = `${left?.project || ""}/${left?.case_name || ""}/${left?.label || ""}`;
+              const rightKey = `${right?.project || ""}/${right?.case_name || ""}/${right?.label || ""}`;
+              return leftKey.localeCompare(rightKey);
+            });
+        }
+
+        function assignLevels(nodeId, level) {
+          const known = levelById.get(nodeId);
+          if (known != null && known <= level) return;
+          levelById.set(nodeId, level);
+          sortedChildren(nodeId).forEach(childId => assignLevels(childId, level + 1));
+        }
+
+        roots.forEach(root => assignLevels(root.id, 0));
+        nodes.forEach(node => {
+          if (!levelById.has(node.id)) assignLevels(node.id, 0);
+        });
+
+        let cursorY = marginY;
+        let maxLevel = 0;
+
+        function placeSubtree(nodeId) {
+          if (visited.has(nodeId)) {
+            const existing = positions.get(nodeId);
+            return existing ? existing.y + existing.h / 2 : cursorY;
+          }
+          visited.add(nodeId);
+          const level = levelById.get(nodeId) || 0;
+          maxLevel = Math.max(maxLevel, level);
+          const x = marginX + level * (nodeWidth + colGap);
+          const children = sortedChildren(nodeId).filter(childId => !visited.has(childId));
+
+          if (!children.length) {
+            const y = cursorY;
+            positions.set(nodeId, { x, y, w: nodeWidth, h: nodeHeight });
+            cursorY += nodeHeight + rowGap;
+            return y + nodeHeight / 2;
+          }
+
+          const centers = children.map(childId => placeSubtree(childId));
+          const centerY = centers.reduce((sum, value) => sum + value, 0) / Math.max(centers.length, 1);
+          const y = Math.max(marginY, centerY - nodeHeight / 2);
+          positions.set(nodeId, { x, y, w: nodeWidth, h: nodeHeight });
+          return centerY;
+        }
+
+        roots.forEach(root => {
+          placeSubtree(root.id);
+          cursorY += rowGap * 0.6;
+        });
+        nodes.forEach(node => {
+          if (!visited.has(node.id)) {
+            placeSubtree(node.id);
+            cursorY += rowGap * 0.6;
+          }
+        });
+
         let maxY = 0;
-        Array.from(columns.keys()).sort((a, b) => a - b).forEach(level => {
-          const column = columns.get(level) || [];
-          column.forEach((node, index) => {
-            const x = marginX + level * (nodeWidth + colGap);
-            const y = marginY + index * (nodeHeight + rowGap);
-            positions.set(node.id, { x, y, w: nodeWidth, h: nodeHeight });
-            maxY = Math.max(maxY, y + nodeHeight);
-          });
+        positions.forEach(pos => {
+          maxY = Math.max(maxY, pos.y + pos.h);
         });
 
         return {
           positions,
-          width: Math.max(980, marginX * 2 + (Math.max(...Array.from(columns.keys()), 0) + 1) * (nodeWidth + colGap)),
+          width: Math.max(980, marginX * 2 + (maxLevel + 1) * (nodeWidth + colGap)),
           height: Math.max(720, maxY + 40),
         };
+      }
+
+      function computeRadialLayout(payload) {
+        const nodes = payload.nodes || [];
+        const edges = payload.edges || [];
+        const hierarchyEdges = edges.filter(edge => edge.kind === "hierarchy");
+        const outgoing = new Map();
+        const incoming = new Map();
+        nodes.forEach(node => {
+          outgoing.set(node.id, []);
+          incoming.set(node.id, []);
+        });
+        hierarchyEdges.forEach(edge => {
+          if (outgoing.has(edge.source)) outgoing.get(edge.source).push(edge.target);
+          if (incoming.has(edge.target)) incoming.get(edge.target).push(edge.source);
+        });
+
+        let centerId = payload.selected_node_id || (nodes[0] && nodes[0].id) || "";
+        while (centerId && (incoming.get(centerId) || []).length) {
+          centerId = incoming.get(centerId)[0];
+        }
+        const positions = new Map();
+        const nodeWidth = 180;
+        const nodeHeight = 92;
+        const centerX = 700;
+        const centerY = 520;
+        const ringGap = 210;
+        let maxRadius = 0;
+
+        function sortedChildren(nodeId) {
+          return (outgoing.get(nodeId) || [])
+            .slice()
+            .sort((leftId, rightId) => {
+              const left = nodes.find(node => node.id === leftId);
+              const right = nodes.find(node => node.id === rightId);
+              return String(left?.label || "").localeCompare(String(right?.label || ""));
+            });
+        }
+
+        function subtreeSize(nodeId) {
+          const children = sortedChildren(nodeId);
+          if (!children.length) return 1;
+          return Math.max(1, children.reduce((sum, childId) => sum + subtreeSize(childId), 0));
+        }
+
+        function placeNode(nodeId, depth, startAngle, endAngle) {
+          const radius = depth * ringGap;
+          const angle = depth === 0 ? -Math.PI / 2 : (startAngle + endAngle) / 2;
+          const x = centerX + Math.cos(angle) * radius - nodeWidth / 2;
+          const y = centerY + Math.sin(angle) * radius - nodeHeight / 2;
+          positions.set(nodeId, { x, y, w: nodeWidth, h: nodeHeight });
+          maxRadius = Math.max(maxRadius, radius);
+
+          const children = sortedChildren(nodeId);
+          if (!children.length) return;
+          const total = children.reduce((sum, childId) => sum + subtreeSize(childId), 0);
+          let cursor = startAngle;
+          children.forEach(childId => {
+            const span = ((endAngle - startAngle) * subtreeSize(childId)) / Math.max(total, 1);
+            placeNode(childId, depth + 1, cursor, cursor + span);
+            cursor += span;
+          });
+        }
+
+        if (centerId) {
+          placeNode(centerId, 0, -Math.PI, Math.PI);
+        }
+
+        const placed = new Set(positions.keys());
+        const leftovers = nodes.filter(node => !placed.has(node.id)).sort((a, b) => String(a.label || "").localeCompare(String(b.label || "")));
+        leftovers.forEach((node, index) => {
+          const radius = ringGap * 3.25;
+          const angle = Math.PI * 0.65 + index * 0.42;
+          const x = centerX + Math.cos(angle) * radius - nodeWidth / 2;
+          const y = centerY + Math.sin(angle) * radius - nodeHeight / 2;
+          positions.set(node.id, { x, y, w: nodeWidth, h: nodeHeight });
+          maxRadius = Math.max(maxRadius, radius);
+        });
+
+        return {
+          positions,
+          width: Math.max(1500, centerX * 2 + maxRadius),
+          height: Math.max(1200, centerY * 2 + maxRadius),
+        };
+      }
+
+      function computeLayout(payload) {
+        if (payload.mode === "radial") return computeRadialLayout(payload);
+        return computeMindmapLayout(payload);
       }
 
       function edgePath(source, target) {
@@ -295,65 +485,182 @@
         return `M ${startX} ${startY} C ${startX + dx} ${startY}, ${endX - dx} ${endY}, ${endX} ${endY}`;
       }
 
+      function fitToContent(payload, viewport, pad) {
+        const layout = computeLayout(payload);
+        const availableWidth = Math.max(320, viewport.clientWidth - 80);
+        const availableHeight = Math.max(240, viewport.clientHeight - 80);
+        const nextZoom = Math.max(0.12, Math.min(2.6, Math.min(availableWidth / Math.max(layout.width, 1), availableHeight / Math.max(layout.height, 1))));
+        sessionStorage.setItem(storageKey("zoom"), String(Number(nextZoom.toFixed(2))));
+        const left = Math.max(0, pad + (layout.width * nextZoom - viewport.clientWidth) / 2);
+        const top = Math.max(0, pad + (layout.height * nextZoom - viewport.clientHeight) / 2);
+        sessionStorage.setItem(storageKey("scroll_left"), String(left));
+        sessionStorage.setItem(storageKey("scroll_top"), String(top));
+        render(payload);
+      }
+
       function render(payload) {
         const app = document.getElementById("app");
-        const nodes = payload.nodes || [];
-        const edges = payload.edges || [];
-        const selectedId = payload.selected_node_id || "";
-        const layout = computeLayout(payload);
+        try {
+          const nodes = payload.nodes || [];
+          const edges = payload.edges || [];
+          const selectedId = payload.selected_node_id || "";
+          const layout = computeLayout(payload);
+          const zoom = Math.max(0.12, Math.min(3.2, readNumberStorage(storageKey("zoom"), 1)));
+          const pad = 1200;
 
-        const nodeMarkup = nodes.map(node => {
-          const pos = layout.positions.get(node.id);
-          const entityType = node.entity_type || (node.synthetic ? "synthetic" : "note");
-          const accent = colorByEntity[entityType] || colorByEntity.synthetic;
-          const shape = shapeByEntity[entityType] || "square";
-          const chips = [
-            node.entity_type ? `<span class="chip">${escapeHtml(node.entity_type)}</span>` : ``,
-            node.status ? `<span class="chip">${escapeHtml(node.status)}</span>` : ``,
-            node.due_at ? `<span class="chip">due ${escapeHtml(node.due_at)}</span>` : ``,
-          ].filter(Boolean).join("");
-          return `
-            <div
-              class="node ${node.synthetic ? `synthetic` : ``} ${selectedId === node.id ? `selected` : ``}"
-              data-node-id="${escapeHtml(node.id)}"
-              style="left:${pos.x}px;top:${pos.y}px;--accent:${accent};"
-            >
-              <div class="node-title"><span class="shape ${shape}" style="--accent:${accent};margin-right:8px;"></span>${escapeHtml(node.label)}</div>
-              <div class="node-meta">${chips}</div>
-            </div>
-          `;
-        }).join("");
+          const nodeMarkup = nodes.map((node, index) => {
+            const pos = layout.positions.get(node.id) || {
+              x: 36 + (index % 4) * 320,
+              y: 24 + Math.floor(index / 4) * 120,
+              w: 180,
+              h: 92,
+            };
+            const entityType = node.entity_type || (node.synthetic ? "synthetic" : "note");
+            const accent = colorByEntity[entityType] || colorByEntity.synthetic;
+            const soft = `${accent}55`;
+            const shape = shapeByEntity[entityType] || "square";
+            const chips = [
+              node.entity_type ? `<span class="chip">${escapeHtml(node.entity_type)}</span>` : ``,
+              node.status ? `<span class="chip">${escapeHtml(node.status)}</span>` : ``,
+              node.due_at ? `<span class="chip">due ${escapeHtml(node.due_at)}</span>` : ``,
+            ].filter(Boolean).join("");
+            return `
+              <div
+                class="node ${shape} ${node.synthetic ? `synthetic` : ``} ${selectedId === node.id ? `selected` : ``}"
+                data-node-id="${escapeHtml(node.id)}"
+                data-selectable="${node.synthetic ? `false` : `true`}"
+                style="left:${pos.x}px;top:${pos.y}px;--accent:${accent};--accent-soft:${soft};"
+              >
+                <div class="node-title"><span class="shape ${shape}" style="--accent:${accent};margin-right:8px;"></span>${escapeHtml(node.label)}</div>
+                <div class="node-meta">${chips}</div>
+              </div>
+            `;
+          }).join("");
 
-        const edgeMarkup = edges.map(edge => {
-          const source = layout.positions.get(edge.source);
-          const target = layout.positions.get(edge.target);
-          if (!source || !target) return "";
-          const className = edge.kind === "relation" ? "edge-relation" : "edge-hierarchy";
-          return `<path class="${className}" d="${edgePath(source, target)}"></path>`;
-        }).join("");
+          const edgeMarkup = edges.map(edge => {
+            const source = layout.positions.get(edge.source);
+            const target = layout.positions.get(edge.target);
+            if (!source || !target) return "";
+            const className = edge.kind === "relation" ? "edge-relation" : "edge-hierarchy";
+            return `<path class="${className}" d="${edgePath(source, target)}"></path>`;
+          }).join("");
 
-        app.innerHTML = `
-          <div class="note">Context Graph Phase A: kattints egy node-ra a helyben szerkesztheto rekord kivalasztasahoz.</div>
-          <div class="shell">
-            <div class="viewport">
-              <div class="canvas" style="width:${layout.width}px;height:${layout.height}px;">
-                <svg class="edges" viewBox="0 0 ${layout.width} ${layout.height}" preserveAspectRatio="xMinYMin meet">${edgeMarkup}</svg>
-                <div class="nodes">${nodeMarkup}</div>
+          app.innerHTML = `
+            <div class="note">
+              <span>Kattints egy rekord-node-ra a jobb oldali szerkeszteshez. Zoom: Ctrl + egergorgeto. Fuggoleges gorgetes: sima gorgeto. Vizszintes gorgetes: Shift + gorgeto. Mozgatas: huzd az ures hatteret.</span>
+              <div class="note-actions">
+                <button class="mini-btn" data-action="fit">Center / Fit</button>
+                <button class="mini-btn" data-action="reset">Reset</button>
               </div>
             </div>
-          </div>
-        `;
+            <div class="shell">
+              <div class="viewport">
+                <div class="canvas-shell" style="width:${layout.width * zoom + pad * 2}px;height:${layout.height * zoom + pad * 2}px;">
+                  <div class="scene" style="left:${pad}px;top:${pad}px;width:${layout.width}px;height:${layout.height}px;transform:scale(${zoom});">
+                    <div class="canvas" style="width:${layout.width}px;height:${layout.height}px;">
+                      <svg class="edges" viewBox="0 0 ${layout.width} ${layout.height}" preserveAspectRatio="xMinYMin meet">${edgeMarkup}</svg>
+                      ${nodeMarkup}
+                    </div>
+                  </div>
+                </div>
+              </div>
+            </div>
+          `;
 
-        app.querySelectorAll("[data-node-id]").forEach(nodeEl => {
-          nodeEl.addEventListener("click", () => {
-            const recordId = nodeEl.dataset.nodeId || "";
-            if (recordId) {
-              sendEvent({ action: "select_node", record_id: recordId });
-            }
+          const viewport = app.querySelector(".viewport");
+          app.querySelectorAll("[data-action]").forEach(button => {
+            button.addEventListener("click", () => {
+              const action = button.dataset.action || "";
+              if (action === "fit" && viewport) {
+                fitToContent(payload, viewport, pad);
+              } else if (action === "reset") {
+                sessionStorage.setItem(storageKey("zoom"), "1");
+                sessionStorage.removeItem(storageKey("scroll_left"));
+                sessionStorage.removeItem(storageKey("scroll_top"));
+                render(payload);
+              }
+            });
           });
-        });
+          app.querySelectorAll("[data-node-id]").forEach(nodeEl => {
+            nodeEl.addEventListener("click", () => {
+              if (nodeEl.dataset.selectable !== "true") return;
+              const recordId = nodeEl.dataset.nodeId || "";
+              if (recordId) sendEvent({ action: "select_node", record_id: recordId });
+            });
+          });
 
-        setTimeout(setFrameHeight, 0);
+          if (viewport) {
+            const defaultLeft = Math.max(0, pad - viewport.clientWidth * 0.25);
+            const defaultTop = Math.max(0, pad - viewport.clientHeight * 0.25);
+            const maxScrollLeft = Math.max(0, viewport.scrollWidth - viewport.clientWidth);
+            const maxScrollTop = Math.max(0, viewport.scrollHeight - viewport.clientHeight);
+            viewport.scrollLeft = Math.min(maxScrollLeft, Math.max(0, readNumberStorage(storageKey("scroll_left"), defaultLeft)));
+            viewport.scrollTop = Math.min(maxScrollTop, Math.max(0, readNumberStorage(storageKey("scroll_top"), defaultTop)));
+            viewport.addEventListener("scroll", () => {
+              sessionStorage.setItem(storageKey("scroll_left"), String(viewport.scrollLeft));
+              sessionStorage.setItem(storageKey("scroll_top"), String(viewport.scrollTop));
+            });
+
+            let dragging = false;
+            let startX = 0;
+            let startY = 0;
+            let scrollLeft = 0;
+            let scrollTop = 0;
+
+            viewport.addEventListener("mousedown", event => {
+              if (event.target.closest(".node")) return;
+              dragging = true;
+              viewport.classList.add("dragging");
+              startX = event.clientX;
+              startY = event.clientY;
+              scrollLeft = viewport.scrollLeft;
+              scrollTop = viewport.scrollTop;
+            });
+            window.addEventListener("mouseup", () => {
+              dragging = false;
+              viewport.classList.remove("dragging");
+            });
+            viewport.addEventListener("mousemove", event => {
+              if (!dragging) return;
+              event.preventDefault();
+              viewport.scrollLeft = scrollLeft - (event.clientX - startX);
+              viewport.scrollTop = scrollTop - (event.clientY - startY);
+            });
+            viewport.addEventListener("wheel", event => {
+              if (event.ctrlKey) {
+                event.preventDefault();
+                const currentZoom = Math.max(0.12, Math.min(3.2, readNumberStorage(storageKey("zoom"), 1)));
+                const nextZoom = Math.max(0.12, Math.min(3.2, currentZoom + (event.deltaY < 0 ? 0.08 : -0.08)));
+                const rect = viewport.getBoundingClientRect();
+                const pointerX = event.clientX - rect.left + viewport.scrollLeft;
+                const pointerY = event.clientY - rect.top + viewport.scrollTop;
+                const sceneX = (pointerX - pad) / currentZoom;
+                const sceneY = (pointerY - pad) / currentZoom;
+                sessionStorage.setItem(storageKey("zoom"), String(Number(nextZoom.toFixed(2))));
+                sessionStorage.setItem(storageKey("scroll_left"), String(Math.max(0, pad + sceneX * nextZoom - (event.clientX - rect.left))));
+                sessionStorage.setItem(storageKey("scroll_top"), String(Math.max(0, pad + sceneY * nextZoom - (event.clientY - rect.top))));
+                render(payload);
+                return;
+              }
+              if (event.shiftKey) {
+                event.preventDefault();
+                viewport.scrollLeft += event.deltaY;
+              }
+            }, { passive: false });
+            viewport.addEventListener("dblclick", event => {
+              if (event.target.closest(".node")) return;
+              sessionStorage.setItem(storageKey("zoom"), "1");
+              sessionStorage.removeItem(storageKey("scroll_left"));
+              sessionStorage.removeItem(storageKey("scroll_top"));
+              render(payload);
+            });
+          }
+
+          setTimeout(setFrameHeight, 0);
+        } catch (error) {
+          app.innerHTML = `<div class="error-box">Context Graph hiba\n${escapeHtml(error && error.stack ? error.stack : String(error))}</div>`;
+          setTimeout(setFrameHeight, 0);
+        }
       }
 
       window.addEventListener("message", event => {

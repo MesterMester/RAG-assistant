@@ -3,6 +3,7 @@ from __future__ import annotations
 import argparse
 from pathlib import Path
 
+from rag_assistant.backup import create_backup
 from rag_assistant.config import load_config
 from rag_assistant.index_store import load_index, save_index
 from rag_assistant.ingest import build_index
@@ -33,6 +34,9 @@ def build_parser() -> argparse.ArgumentParser:
     search_parser.add_argument("query", help="Search query")
     search_parser.add_argument("--source-dir", required=False, help="Path to the source knowledge directory")
     search_parser.add_argument("--limit", type=int, default=5)
+
+    backup_parser = subparsers.add_parser("backup", help="Create a dated snapshot backup of the active RAG-DB")
+    backup_parser.add_argument("--source-dir", required=False, help="Path to the source knowledge directory")
 
     obsidian_dry_run = subparsers.add_parser(
         "import-obsidian-dry-run",
@@ -104,6 +108,14 @@ def main() -> None:
         except VectorStoreError as exc:
             raise SystemExit(str(exc)) from exc
         print(f"Upserted {count} manual records into {config.chroma_dir_for(source_dir)}")
+        return
+
+    if args.command == "backup":
+        source_dir = resolve_source_dir(config, args.source_dir)
+        result = create_backup(source_dir, config.backup_dir_for(source_dir))
+        print(f"Backup created: {result.archive_path}")
+        print(f"Manifest: {result.manifest_path}")
+        print(f"Size: {result.size_bytes} bytes")
         return
 
     if args.command == "search":

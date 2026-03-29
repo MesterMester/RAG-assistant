@@ -83,6 +83,14 @@ Kereses a keyword indexben:
 rag search "projekt hatarido"
 ```
 
+Kezi backup keszitese a teljes aktiv `RAG-DB`-rol:
+
+```bash
+rag backup
+```
+
+A backup a `RAG-DB/.rag_assistant/backups/` ala kerul, zip snapshotkent es kulon manifest JSON fajllal.
+
 Obsidian markdown import dry-run egyetlen note-ra:
 
 ```bash
