@@ -166,9 +166,30 @@
         clip-path: polygon(9% 0%, 91% 0%, 100% 50%, 91% 100%, 9% 100%, 0% 50%);
       }
       .node-title {
+        display: flex;
+        align-items: center;
+        justify-content: space-between;
+        gap: 8px;
         font-weight: 700;
         font-size: 14px;
         margin-bottom: 4px;
+      }
+      .node-title-main {
+        display: inline-flex;
+        align-items: center;
+        min-width: 0;
+      }
+      .toggle-btn {
+        appearance: none;
+        border: 1px solid rgba(148, 163, 184, 0.5);
+        background: rgba(255,255,255,0.88);
+        border-radius: 999px;
+        width: 24px;
+        height: 24px;
+        cursor: pointer;
+        color: #334155;
+        font-weight: 700;
+        flex: 0 0 auto;
       }
       .node-meta {
         font-size: 11px;
@@ -280,6 +301,18 @@
         return Number.isFinite(parsed) ? parsed : fallback;
       }
 
+      function readCollapsedState() {
+        try {
+          return JSON.parse(sessionStorage.getItem(storageKey("collapsed_nodes")) || "{}");
+        } catch (_error) {
+          return {};
+        }
+      }
+
+      function writeCollapsedState(state) {
+        sessionStorage.setItem(storageKey("collapsed_nodes"), JSON.stringify(state));
+      }
+
       function escapeHtml(value) {
         return String(value ?? "")
           .replaceAll("&", "&amp;")
@@ -289,20 +322,52 @@
           .replaceAll("'", "&#039;");
       }
 
-      function computeMindmapLayout(payload) {
+      function hierarchyMaps(payload) {
         const nodes = payload.nodes || [];
         const edges = payload.edges || [];
         const hierarchyEdges = edges.filter(edge => edge.kind === "hierarchy");
-        const incoming = new Map();
         const outgoing = new Map();
+        const incoming = new Map();
         nodes.forEach(node => {
-          incoming.set(node.id, []);
           outgoing.set(node.id, []);
+          incoming.set(node.id, []);
         });
         hierarchyEdges.forEach(edge => {
-          if (incoming.has(edge.target)) incoming.get(edge.target).push(edge.source);
           if (outgoing.has(edge.source)) outgoing.get(edge.source).push(edge.target);
+          if (incoming.has(edge.target)) incoming.get(edge.target).push(edge.source);
         });
+        return { outgoing, incoming, hierarchyEdges };
+      }
+
+      function visiblePayload(payload, collapsedState) {
+        const nodes = payload.nodes || [];
+        const edges = payload.edges || [];
+        const { outgoing } = hierarchyMaps(payload);
+        const hidden = new Set();
+
+        function hideDescendants(nodeId) {
+          (outgoing.get(nodeId) || []).forEach(childId => {
+            if (hidden.has(childId)) return;
+            hidden.add(childId);
+            hideDescendants(childId);
+          });
+        }
+
+        Object.entries(collapsedState || {}).forEach(([nodeId, collapsed]) => {
+          if (collapsed) hideDescendants(nodeId);
+        });
+
+        const visibleNodeIds = new Set(nodes.map(node => node.id).filter(nodeId => !hidden.has(nodeId)));
+        return {
+          ...payload,
+          nodes: nodes.filter(node => visibleNodeIds.has(node.id)),
+          edges: edges.filter(edge => visibleNodeIds.has(edge.source) && visibleNodeIds.has(edge.target)),
+        };
+      }
+
+      function computeMindmapLayout(payload) {
+        const nodes = payload.nodes || [];
+        const { incoming, outgoing } = hierarchyMaps(payload);
 
         const roots = nodes
           .filter(node => (incoming.get(node.id) || []).length === 0)
@@ -395,18 +460,7 @@
 
       function computeRadialLayout(payload) {
         const nodes = payload.nodes || [];
-        const edges = payload.edges || [];
-        const hierarchyEdges = edges.filter(edge => edge.kind === "hierarchy");
-        const outgoing = new Map();
-        const incoming = new Map();
-        nodes.forEach(node => {
-          outgoing.set(node.id, []);
-          incoming.set(node.id, []);
-        });
-        hierarchyEdges.forEach(edge => {
-          if (outgoing.has(edge.source)) outgoing.get(edge.source).push(edge.target);
-          if (incoming.has(edge.target)) incoming.get(edge.target).push(edge.source);
-        });
+        const { outgoing, incoming } = hierarchyMaps(payload);
 
         let centerId = payload.selected_node_id || (nodes[0] && nodes[0].id) || "";
         while (centerId && (incoming.get(centerId) || []).length) {
@@ -525,10 +579,14 @@
       function render(payload) {
         const app = document.getElementById("app");
         try {
-          const nodes = payload.nodes || [];
-          const edges = payload.edges || [];
-          const selectedId = payload.selected_node_id || "";
-          const layout = computeLayout(payload);
+          const collapsedState = readCollapsedState();
+          const fullNodes = payload.nodes || [];
+          const { outgoing } = hierarchyMaps(payload);
+          const currentPayload = visiblePayload(payload, collapsedState);
+          const nodes = currentPayload.nodes || [];
+          const edges = currentPayload.edges || [];
+          const selectedId = currentPayload.selected_node_id || "";
+          const layout = computeLayout(currentPayload);
           const viewportZoom = Math.max(0.12, Math.min(3.2, readNumberStorage(storageKey("zoom"), 1)));
           const pad = 1200;
 
@@ -543,6 +601,8 @@
             const accent = colorByEntity[entityType] || colorByEntity.synthetic;
             const soft = `${accent}55`;
             const shape = shapeByEntity[entityType] || "square";
+            const childCount = (outgoing.get(node.id) || []).length;
+            const isCollapsed = Boolean(collapsedState[node.id]);
             const chips = [
               node.entity_type ? `<span class="chip">${escapeHtml(node.entity_type)}</span>` : ``,
               node.status ? `<span class="chip">${escapeHtml(node.status)}</span>` : ``,
@@ -555,7 +615,10 @@
                 data-selectable="${node.synthetic ? `false` : `true`}"
                 style="left:${pos.x}px;top:${pos.y}px;--accent:${accent};--accent-soft:${soft};"
               >
-                <div class="node-title"><span class="shape ${shape}" style="--accent:${accent};margin-right:8px;"></span>${escapeHtml(node.label)}</div>
+                <div class="node-title">
+                  <span class="node-title-main"><span class="shape ${shape}" style="--accent:${accent};margin-right:8px;"></span>${escapeHtml(node.label)}</span>
+                  ${childCount ? `<button class="toggle-btn" type="button" data-toggle-node="${escapeHtml(node.id)}">${isCollapsed ? `+` : `−`}</button>` : ``}
+                </div>
                 <div class="node-meta">${chips}</div>
               </div>
             `;
@@ -606,6 +669,17 @@
                 sessionStorage.removeItem(storageKey("auto_fit_done"));
                 render(payload);
               }
+            });
+          });
+          app.querySelectorAll("[data-toggle-node]").forEach(button => {
+            button.addEventListener("click", event => {
+              event.preventDefault();
+              event.stopPropagation();
+              const nodeId = button.dataset.toggleNode || "";
+              if (!nodeId) return;
+              const nextState = { ...collapsedState, [nodeId]: !collapsedState[nodeId] };
+              writeCollapsedState(nextState);
+              render(payload);
             });
           });
           app.querySelectorAll("[data-node-id]").forEach(nodeEl => {
