@@ -12,6 +12,7 @@ from rag_assistant.config import load_config
 from rag_assistant.execution_dnd_component import execution_dnd_board
 from rag_assistant.index_store import load_index, save_index
 from rag_assistant.ingest import build_index
+from rag_assistant.kanban_dnd_component import kanban_dnd_board
 from rag_assistant.models import KnowledgeRecord, utc_now_iso
 from rag_assistant.planning_layout import (
     add_block,
@@ -48,6 +49,15 @@ ENTITY_OPTIONS = [
     "source_item",
 ]
 NONE_OPTION = "<nincs>"
+STATUS_LABELS = {
+    "inbox": "Backlog",
+    "next": "Next",
+    "active": "Active",
+    "waiting": "Waiting",
+    "done": "Done",
+    "cancelled": "Cancelled",
+    "archived": "Archived",
+}
 HIERARCHY_FIELD_BY_ENTITY = {
     "organization": "organization",
     "team": "team",
@@ -198,24 +208,65 @@ def build_execution_sections(layout: dict) -> list[dict]:
     current_week_end = current_week_start + timedelta(days=6)
     next_week_end = next_week_start + timedelta(days=6)
 
-    all_days: list[dict] = []
+    day_lookup: dict[str, dict] = {}
     for week in layout.get("weeks", []):
         for day in week.get("days", []):
             day_date_raw = day.get("date")
             if not day_date_raw:
                 continue
             display_day = dict(day)
-            display_day["date_obj"] = date.fromisoformat(day_date_raw)
-            all_days.append(display_day)
-    all_days.sort(key=lambda item: item["date_obj"])
+            day_date = date.fromisoformat(day_date_raw)
+            display_day["date_obj"] = day_date
+            display_day["week_start_date"] = week.get("start_date")
+            if not display_day.get("custom_title"):
+                display_day["title"] = day_display_title(day_date, today)
+            existing = day_lookup.get(day_date_raw)
+            if existing is None:
+                day_lookup[day_date_raw] = display_day
+                continue
+            existing_week_start = existing.get("week_start_date") or ""
+            current_week_start_value = week.get("start_date") or ""
+            current_is_legacy = not current_week_start_value
+            existing_is_legacy = not existing_week_start
+            if existing_is_legacy and not current_is_legacy:
+                day_lookup[day_date_raw] = display_day
+    all_days = sorted(day_lookup.values(), key=lambda item: item["date_obj"])
+
+    def serialize_day(day: dict) -> dict:
+        serialized_day = dict(day)
+        serialized_day.pop("date_obj", None)
+        return serialized_day
 
     def make_group(key: str, title: str, days: list[dict], meta: str = "") -> dict:
         serialized_days = []
         for day in days:
-            serialized_day = dict(day)
-            serialized_day.pop("date_obj", None)
-            serialized_days.append(serialized_day)
+            serialized_days.append(serialize_day(day))
         return {"key": key, "title": title, "meta": meta, "days": serialized_days}
+
+    def make_past_archive_group(key: str, title: str, days: list[dict], meta: str = "") -> dict:
+        alias_keys: list[str] = []
+        for day in days:
+            for block in day.get("blocks", []):
+                block_key = block.get("key", "")
+                if block_key:
+                    alias_keys.append(block_key)
+        archive_day = {
+            "key": f"{key}-archive",
+            "title": title,
+            "date": "",
+            "blocks": [
+                {
+                    "key": f"{key}-archive-bucket",
+                    "title": title,
+                    "lane": "parking",
+                    "alias_keys": alias_keys,
+                    "droppable": False,
+                    "sort": "date_desc",
+                    "show_due_meta": True,
+                }
+            ],
+        }
+        return {"key": key, "title": title, "meta": meta, "days": [archive_day]}
 
     def make_week_group(week_start: date, days: list[dict]) -> dict:
         week_no = week_start.isocalendar().week
@@ -234,17 +285,44 @@ def build_execution_sections(layout: dict) -> list[dict]:
         for day in normal_days:
             merged.append(day)
         if weekend_days:
-            blocks = []
+            saturday = min(weekend_days, key=lambda item: item["date_obj"])
+            must_aliases: list[str] = []
+            prefer_aliases: list[str] = []
+            session_blocks: list[dict] = []
             for day in weekend_days:
                 for block in day.get("blocks", []):
-                    merged_block = dict(block)
-                    merged_block["title"] = f"{day.get('title', '')} - {block.get('title', '')}"
-                    blocks.append(merged_block)
+                    lane = block.get("lane", "session")
+                    if lane == "must":
+                        must_aliases.append(block.get("key", ""))
+                    elif lane == "prefer":
+                        prefer_aliases.append(block.get("key", ""))
+                    else:
+                        merged_block = dict(block)
+                        merged_block["title"] = f"{day.get('title', '')} - {block.get('title', '')}"
+                        merged_block["alias_keys"] = [block.get("key", "")]
+                        session_blocks.append(merged_block)
+            blocks = [
+                {
+                    "key": f"{saturday['key']}-weekend-must",
+                    "title": "Mindenkepp",
+                    "lane": "must",
+                    "alias_keys": [key for key in must_aliases if key],
+                    "drop_target_key": must_aliases[0] if must_aliases else "",
+                },
+                {
+                    "key": f"{saturday['key']}-weekend-prefer",
+                    "title": "Lehetoleg",
+                    "lane": "prefer",
+                    "alias_keys": [key for key in prefer_aliases if key],
+                    "drop_target_key": prefer_aliases[0] if prefer_aliases else "",
+                },
+                *session_blocks,
+            ]
             merged.append(
                 {
                     "key": f"weekend-{'-'.join(day['key'] for day in weekend_days)}",
                     "title": "Hetvege",
-                    "date": f"{weekend_days[0]['date']} / {weekend_days[-1]['date']}",
+                    "date": weekend_days[0]["date"],
                     "blocks": blocks,
                     "date_obj": weekend_days[0]["date_obj"],
                 }
@@ -256,12 +334,11 @@ def build_execution_sections(layout: dict) -> list[dict]:
 
     past_yesterday = [dict(day, title="Tegnap") for day in all_days if day["date_obj"] == yesterday]
     past_day_before = [dict(day, title="Tegnapelott") for day in all_days if day["date_obj"] == day_before]
-    past_earlier_this_week = [day for day in all_days if current_week_start <= day["date_obj"] < day_before]
-    past_older = [day for day in all_days if day["date_obj"] < current_week_start]
+    past_archive = [day for day in all_days if day["date_obj"] < day_before]
 
     future_tomorrow = [dict(day, title="Holnap") for day in all_days if day["date_obj"] == today + timedelta(days=1)]
     future_this_week = [day for day in all_days if today + timedelta(days=2) <= day["date_obj"] <= current_week_end]
-    future_next_week = [day for day in all_days if next_week_start <= day["date_obj"] <= next_week_end]
+    future_next_week = [day for day in all_days if next_week_start <= day["date_obj"] <= next_week_end and day["date_obj"] > today + timedelta(days=1)]
     future_later_weeks: list[dict] = []
     for offset in range(2, 10):
         week_start = current_week_start + timedelta(days=7 * offset)
@@ -278,8 +355,7 @@ def build_execution_sections(layout: dict) -> list[dict]:
             "groups": [
                 make_group("yesterday", "Tegnap", past_yesterday),
                 make_group("day_before", "Tegnapelott", past_day_before),
-                make_group("earlier_this_week", "Korabban a heten", past_earlier_this_week),
-                make_group("older", "Regebb", past_older),
+                make_past_archive_group("past_archive", "Korabbi dolgok", past_archive, "Legujabb felul"),
             ],
         },
         {
@@ -335,6 +411,37 @@ def parse_csv_list(value: str) -> list[str]:
     return [item.strip() for item in (value or "").split(",") if item.strip()]
 
 
+def parse_next_steps(value: str) -> list[dict]:
+    steps: list[dict] = []
+    for raw_line in (value or "").splitlines():
+        line = raw_line.strip()
+        if not line:
+            continue
+        done = line.startswith("[x]") or line.startswith("[X]")
+        if line.startswith("[x]") or line.startswith("[X]") or line.startswith("[ ]"):
+            line = line[3:].strip()
+        parts = [part.strip() for part in line.split("|")]
+        title = parts[0] if parts else ""
+        estimate = parts[1] if len(parts) > 1 else ""
+        if title:
+            steps.append({"title": title, "estimate": estimate, "done": done})
+    return steps
+
+
+def format_next_steps(steps: list[dict]) -> str:
+    lines: list[str] = []
+    for item in steps or []:
+        if not isinstance(item, dict):
+            continue
+        prefix = "[x]" if item.get("done") else "[ ]"
+        title = str(item.get("title", "")).strip()
+        estimate = str(item.get("estimate", "")).strip()
+        if not title:
+            continue
+        lines.append(f"{prefix} {title}" + (f" | {estimate}" if estimate else ""))
+    return "\n".join(lines)
+
+
 def normalize_table_value(value) -> str:
     if pd.isna(value):
         return ""
@@ -381,6 +488,9 @@ def record_from_table_row(row: dict, existing: KnowledgeRecord) -> KnowledgeReco
         due_at=due_at,
         deadline=deadline,
         event_at=event_at,
+        next_step=normalize_table_value(row.get("next_step")) or existing.next_step,
+        next_step_estimate=normalize_table_value(row.get("next_step_estimate")) or existing.next_step_estimate,
+        next_steps=list(existing.next_steps),
         planning_bucket=normalize_table_value(row.get("planning_bucket")),
         focus_rank=focus_rank,
     )
@@ -541,6 +651,7 @@ def render_record_editor(
     show_event = entity_type == "event"
     show_decision = entity_type in {"project", "case", "task", "decision", "note", "source_item"}
     show_planning = entity_type in {"task", "case", "project", "decision", "note", "source_item", "event"}
+    show_next_steps = entity_type == "task"
 
     parent_status_people = st.columns(3)
     if show_parent:
@@ -682,6 +793,22 @@ def render_record_editor(
         planning_bucket = ""
         focus_rank_value = None
 
+    if show_next_steps:
+        step_col1, step_col2 = st.columns(2)
+        next_step = step_col1.text_input("Next step", value=record.next_step, key=f"{key_prefix}_next_step")
+        next_step_estimate = step_col2.text_input("Becsult ido", value=record.next_step_estimate, key=f"{key_prefix}_next_step_estimate", placeholder="pl. 25p vagy 1h")
+        next_steps_raw = st.text_area(
+            "Next steps lista",
+            value=format_next_steps(record.next_steps),
+            height=120,
+            help="Soronkent: [ ] Lepes | 25p vagy [x] Lepes | 1h",
+            key=f"{key_prefix}_next_steps",
+        )
+    else:
+        next_step = ""
+        next_step_estimate = ""
+        next_steps_raw = ""
+
     return {
         "title": title.strip(),
         "entity_type": entity_type,
@@ -702,6 +829,9 @@ def render_record_editor(
         "due_at": due_at.isoformat() if isinstance(due_at, date) else None,
         "deadline": deadline.isoformat() if isinstance(deadline, date) else None,
         "event_at": event_at.isoformat() if isinstance(event_at, date) else None,
+        "next_step": next_step.strip(),
+        "next_step_estimate": next_step_estimate.strip(),
+        "next_steps": parse_next_steps(next_steps_raw),
         "planning_bucket": planning_bucket,
         "focus_rank": focus_rank_value,
     }
@@ -1149,6 +1279,9 @@ def app() -> None:
                     due_at=create_values["due_at"],
                     deadline=create_values["deadline"],
                     event_at=create_values["event_at"],
+                    next_step=create_values["next_step"],
+                    next_step_estimate=create_values["next_step_estimate"],
+                    next_steps=create_values["next_steps"],
                     planning_bucket=create_values["planning_bucket"],
                     focus_rank=create_values["focus_rank"],
                 )
@@ -1205,6 +1338,9 @@ def app() -> None:
                     due_at=edit_values["due_at"],
                     deadline=edit_values["deadline"],
                     event_at=edit_values["event_at"],
+                    next_step=edit_values["next_step"],
+                    next_step_estimate=edit_values["next_step_estimate"],
+                    next_steps=edit_values["next_steps"],
                     planning_bucket=edit_values["planning_bucket"],
                     focus_rank=edit_values["focus_rank"],
                 )
@@ -1238,6 +1374,18 @@ def app() -> None:
                 key="table_filter_planning_bucket",
             )
             filter_text = filter_col8.text_input("Altalanos szoveges szures", key="table_filter_text")
+
+            due_col1, due_col2 = st.columns(2)
+            filter_due_from = due_col1.date_input(
+                "Due date - tol",
+                value=st.session_state.get("table_filter_due_from"),
+                key="table_filter_due_from",
+            )
+            filter_due_to = due_col2.date_input(
+                "Due date - ig",
+                value=st.session_state.get("table_filter_due_to"),
+                key="table_filter_due_to",
+            )
 
             sort_col1, sort_col2 = st.columns(2)
             table_sort_by = sort_col1.selectbox(
@@ -1287,7 +1435,15 @@ def app() -> None:
                     or needle in record.team.lower()
                     or needle in record.project.lower()
                     or needle in record.case_name.lower()
+                    or needle in record.next_step.lower()
+                    or needle in record.next_step_estimate.lower()
                 ]
+            if filter_due_from:
+                due_from_iso = filter_due_from.isoformat()
+                filtered_records = [record for record in filtered_records if record.due_at and record.due_at >= due_from_iso]
+            if filter_due_to:
+                due_to_iso = filter_due_to.isoformat()
+                filtered_records = [record for record in filtered_records if record.due_at and record.due_at <= due_to_iso]
 
             filtered_records.sort(
                 key=lambda record: {
@@ -1315,6 +1471,11 @@ def app() -> None:
                         "status": st.column_config.SelectboxColumn("statusz", options=STATUS_OPTIONS, required=True),
                         "decision_needed": st.column_config.CheckboxColumn("dontes?"),
                         "planning_bucket": st.column_config.SelectboxColumn("tervezesi hely", options=planning_options),
+                        "next_step": st.column_config.TextColumn("next step"),
+                        "next_step_estimate": st.column_config.TextColumn("becsult ido"),
+                        "due_at": st.column_config.TextColumn("due date"),
+                        "deadline": st.column_config.TextColumn("deadline"),
+                        "start_at": st.column_config.TextColumn("start date"),
                         "record_id": st.column_config.TextColumn("record_id", disabled=True),
                         "created_at": st.column_config.TextColumn("created_at", disabled=True),
                         "updated_at": st.column_config.TextColumn("updated_at", disabled=True),
@@ -1393,40 +1554,31 @@ def app() -> None:
 
     with tab_kanban:
         st.subheader("Kanban nezet")
-        st.caption("Itt helyben is valthatsz statuszt a task, case es project rekordokon.")
+        st.caption("Drag-and-drop statuszvaltas task, case es project rekordokra. Az `inbox` itt `Backlog` neven jelenik meg.")
         task_like = [record for record in records if record.entity_type in {"task", "case", "project"}]
-        columns = st.columns(len(STATUS_OPTIONS))
-        for column, status_name in zip(columns, STATUS_OPTIONS):
-            with column:
-                st.markdown(f"**{status_name}**")
-                matches = [record for record in task_like if record.status == status_name]
-                if not matches:
-                    st.caption("Nincs elem")
-                for record in matches:
-                    st.markdown(f"**{record.title}**")
-                    st.caption(f"{record.entity_type} | {record.organization} / {record.team} / {record.project} / {record.case_name}")
-                    if record.summary:
-                        st.write(record.summary)
-                    if record.decision_needed:
-                        st.warning("Dontest igenyel")
-
-                    new_status = st.selectbox(
-                        "Uj statusz",
-                        STATUS_OPTIONS,
-                        index=STATUS_OPTIONS.index(record.status) if record.status in STATUS_OPTIONS else 0,
-                        key=f"kanban_status_{record.record_id}",
-                        label_visibility="collapsed",
-                    )
-                    action_col1, action_col2 = st.columns(2)
-                    with action_col1:
-                        if st.button("Statusz mentese", key=f"save_kanban_{record.record_id}"):
-                            updated_record = update_record(record, status=new_status)
-                            persist_record(updated_record, source_dir, config, records_path, index_path, chroma_dir)
-                    with action_col2:
-                        if st.button("Megnyit", key=f"open_kanban_{record.record_id}"):
-                            st.session_state["selected_record_id"] = record.record_id
-                            st.rerun()
-                    st.divider()
+        kanban_payload = {
+            "statuses": [{"key": status, "title": STATUS_LABELS.get(status, status)} for status in STATUS_OPTIONS],
+            "items": [
+                {
+                    "record_id": record.record_id,
+                    "title": record.title,
+                    "status": record.status,
+                    "entity_type": record.entity_type,
+                    "project": record.project,
+                }
+                for record in task_like
+            ],
+        }
+        kanban_result = kanban_dnd_board(kanban_payload, key="kanban_dnd_surface")
+        if isinstance(kanban_result, dict) and kanban_result.get("action") == "move_status":
+            event_id = str(kanban_result.get("event_id", "")).strip()
+            if event_id and st.session_state.get("last_kanban_drag_event") != event_id:
+                st.session_state["last_kanban_drag_event"] = event_id
+                record_id = str(kanban_result.get("record_id", "")).strip()
+                new_status = str(kanban_result.get("status", "")).strip()
+                moved_record = next((record for record in task_like if record.record_id == record_id), None)
+                if moved_record and new_status and new_status != moved_record.status:
+                    persist_record(update_record(moved_record, status=new_status), source_dir, config, records_path, index_path, chroma_dir)
 
     with tab_timeline:
         st.subheader("Timeline nezet")

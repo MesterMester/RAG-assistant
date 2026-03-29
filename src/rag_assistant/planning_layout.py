@@ -39,6 +39,7 @@ def _default_day(day_value: date, include_current_blocks: bool = False) -> dict:
     return {
         "key": day_key,
         "title": _weekday_title(day_value),
+        "custom_title": False,
         "date": day_value.isoformat(),
         "blocks": blocks,
     }
@@ -189,6 +190,7 @@ def add_day(layout: dict, week_key: str, day_date_value: str, title: str | None 
     day = {
         "key": day_key,
         "title": title.strip() if title else day_date.strftime("%A"),
+        "custom_title": bool(title and title.strip()),
         "date": day_date.isoformat(),
         "blocks": [
             {"key": f"{day_key}-must", "title": "Mindenkepp", "lane": "must"},
@@ -247,6 +249,7 @@ def rename_day(layout: dict, day_key: str, title: str) -> dict:
     day = find_day(layout, day_key)
     if day:
         day["title"] = title.strip()
+        day["custom_title"] = True
     return layout
 
 

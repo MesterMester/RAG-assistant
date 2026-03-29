@@ -200,6 +200,9 @@
         box-shadow: 0 14px 26px rgba(15, 23, 42, 0.12);
         border-color: #0f172a;
       }
+      .bucket.non-droppable {
+        border-style: dashed;
+      }
       .bucket-header {
         margin-bottom: 10px;
       }
@@ -238,6 +241,15 @@
       .task-meta {
         font-size: 12px;
         color: var(--muted);
+      }
+      .task-date {
+        display: inline-flex;
+        margin-top: 6px;
+        padding: 2px 8px;
+        border-radius: 999px;
+        background: rgba(148, 163, 184, 0.14);
+        font-size: 11px;
+        color: #475569;
       }
       .empty {
         color: var(--muted);
@@ -491,34 +503,111 @@
           </div>
         `;
 
+        function renderTreeBlocks(day) {
+          return (day.blocks || []).map(bucket => `
+            <div class="tree-drop" ${bucket.droppable === false ? `` : `data-bucket-key="${escapeHtml(bucket.drop_target_key || bucket.key)}"`}>
+              <div style="display:flex;align-items:center;justify-content:space-between;gap:8px;"><span>${escapeHtml(bucket.title)}</span>${bucket.lane === "session" ? `<button class="mini-btn danger" data-remove-block="${escapeHtml(bucket.key)}">×</button>` : ``}</div>
+            </div>
+          `).join("");
+        }
+
+        function renderTreeDay(day, compact = false, hideTitle = false) {
+          if (compact) {
+            return `
+              <div class="tree-day">
+                ${hideTitle ? `` : `<div style="display:flex;align-items:center;gap:8px;margin-bottom:6px;"><span class="tree-link" data-anchor-target="anchor-${escapeHtml(day.key || day.title)}" style="font-weight:700;">${escapeHtml(day.title)}</span>${day.key !== "__unscheduled__" ? `<button class="mini-btn" data-add-block-day="${escapeHtml(day.key || "")}">+</button><button class="mini-btn" data-rename-day="${escapeHtml(day.key || "")}" data-current-title="${escapeHtml(day.title || "")}">✎</button>` : ``}</div>`}
+                <div class="tree-section">${renderTreeBlocks(day)}</div>
+              </div>
+            `;
+          }
+          return `
+            <details class="tree tree-day" open>
+              <summary>
+                <button class="toggle" type="button" aria-label="Nyitas-zaras"></button>
+                <span class="tree-link" data-anchor-target="anchor-${escapeHtml(day.key || day.title)}">
+                  <div class="day-title" style="font-size:14px;">${escapeHtml(day.title)}</div>
+                  <div class="day-date">${escapeHtml(day.date || "")}</div>
+                </span>
+                ${day.key !== "__unscheduled__" ? `<button class="mini-btn" data-add-block-day="${escapeHtml(day.key || "")}">+</button><button class="mini-btn" data-rename-day="${escapeHtml(day.key || "")}" data-current-title="${escapeHtml(day.title || "")}">✎</button>` : ``}
+              </summary>
+              <div class="tree-section">${renderTreeBlocks(day)}</div>
+            </details>
+          `;
+        }
+
+        function renderBoardDay(day, compact = false, hideTitle = false) {
+          const blocks = (day.blocks || []).map(bucket => {
+            const lane = bucket.lane || "session";
+            const style = laneStyles[lane] || laneStyles.session;
+            const sourceKeys = (bucket.alias_keys && bucket.alias_keys.length ? bucket.alias_keys : [bucket.key]).filter(Boolean);
+            const entries = sourceKeys.flatMap(key => taskByBucket.get(key) || []).slice().sort((a, b) => {
+              if (bucket.sort === "date_desc") {
+                const left = a.due_at || "";
+                const right = b.due_at || "";
+                if (left !== right) return right.localeCompare(left);
+              }
+              const left = a.focus_rank == null ? 9999 : a.focus_rank;
+              const right = b.focus_rank == null ? 9999 : b.focus_rank;
+              return left - right;
+            });
+            const taskMarkup = entries.length
+              ? entries.map(task => `
+                <div class="task" draggable="true" data-record-id="${escapeHtml(task.record_id)}" style="--bucket-accent:${style.accent};">
+                  <div class="task-title">${escapeHtml(task.title)}</div>
+                  <div class="task-meta">${escapeHtml(task.project || "-")} / ${escapeHtml(task.case_name || "-")}</div>
+                  ${bucket.show_due_meta && task.due_at ? `<div class="task-date">${escapeHtml(task.due_at)}</div>` : ``}
+                </div>
+              `).join("")
+              : `<div class="empty">Ures blokk</div>`;
+            return `
+              <div class="bucket ${bucket.droppable === false ? `non-droppable` : ``}" ${bucket.droppable === false ? `` : `data-bucket-key="${escapeHtml(bucket.drop_target_key || bucket.key)}"`} style="--bucket-bg:${style.bg};--bucket-accent:${style.accent};">
+                <div class="bucket-header">
+                  <div style="display:flex;align-items:center;justify-content:space-between;gap:8px;">
+                    <div class="bucket-title">${escapeHtml(bucket.title)}</div>
+                    ${bucket.lane === "session" ? `<button class="mini-btn danger" data-remove-block="${escapeHtml(bucket.key)}">×</button>` : ``}
+                  </div>
+                  ${hideTitle ? `` : `<div class="bucket-subtitle">${escapeHtml(day.title)}</div>`}
+                </div>
+                <div class="task-list">${taskMarkup}</div>
+              </div>
+            `;
+          }).join("");
+          if (compact) {
+            return `
+              <div class="day" id="anchor-${escapeHtml(day.key || day.title)}">
+                ${hideTitle ? `` : `<div style="display:flex;align-items:center;gap:8px;margin-bottom:10px;"><div class="day-title">${escapeHtml(day.title)}</div>${day.key !== "__unscheduled__" ? `<button class="mini-btn" data-add-block-day="${escapeHtml(day.key || "")}">+</button><button class="mini-btn" data-rename-day="${escapeHtml(day.key || "")}" data-current-title="${escapeHtml(day.title || "")}">✎</button>` : ``}</div>`}
+                <div class="blocks">${blocks}</div>
+              </div>
+            `;
+          }
+          return `
+            <details class="tree day" open>
+              <summary class="day-header" id="anchor-${escapeHtml(day.key || day.title)}">
+                <button class="toggle" type="button" aria-label="Nyitas-zaras"></button>
+                <span>
+                  <div class="day-title">${escapeHtml(day.title)}</div>
+                  <div class="day-date">${escapeHtml(day.date || "")}</div>
+                </span>
+                ${day.key !== "__unscheduled__" ? `<button class="mini-btn" data-add-block-day="${escapeHtml(day.key || "")}">+</button><button class="mini-btn" data-rename-day="${escapeHtml(day.key || "")}" data-current-title="${escapeHtml(day.title || "")}">✎</button>` : ``}
+              </summary>
+              <div class="section-body"><div class="blocks">${blocks}</div></div>
+            </details>
+          `;
+        }
+
         const treeHtml = sections.map(section => {
           const isUnscheduled = section.key === "unscheduled";
           const groups = isUnscheduled
             ? [{ title: "Idopont nelkul", meta: "", days: [{ key: "__unscheduled__", title: "Idopont nelkul", date: "", blocks: [{ key: "__unscheduled__", title: "Idopont nelkul", lane: "parking" }] }] }]
             : (section.groups || []);
+          const flattenSection = groups.length === 1 && (groups[0].title || "") === (section.title || "");
           const groupTreeHtml = groups.map(group => {
-            const dayTreeHtml = (group.days || []).map(day => {
-            const blockTreeHtml = (day.blocks || []).map(bucket => `
-              <div class="tree-drop" data-bucket-key="${escapeHtml(bucket.key)}">
-                <div style="display:flex;align-items:center;justify-content:space-between;gap:8px;"><span>${escapeHtml(bucket.title)}</span>${bucket.lane === "session" ? `<button class="mini-btn danger" data-remove-block="${escapeHtml(bucket.key)}">×</button>` : ``}</div>
-              </div>
-            `).join("");
-            return `
-              <details class="tree tree-day" open>
-                <summary>
-                  <button class="toggle" type="button" aria-label="Nyitas-zaras"></button>
-                  <span class="tree-link" data-anchor-target="anchor-${escapeHtml(day.key || day.title)}">
-                    <div class="day-title" style="font-size:14px;">${escapeHtml(day.title)}</div>
-                    <div class="day-date">${escapeHtml(day.date || "")}</div>
-                  </span>
-                  ${day.key !== "__unscheduled__" ? `<button class="mini-btn" data-add-block-day="${escapeHtml(day.key || "")}">+</button><button class="mini-btn" data-rename-day="${escapeHtml(day.key || "")}" data-current-title="${escapeHtml(day.title || "")}">✎</button>` : ``}
-                </summary>
-                <div class="tree-section">
-                  ${blockTreeHtml}
-                </div>
-              </details>
-            `;
-            }).join("");
+            const compactGroup = (group.days || []).length === 1 && (group.days[0].title || "") === (group.title || "");
+            const hideDayTitle = compactGroup;
+            const dayTreeHtml = (group.days || []).map(day => renderTreeDay(day, compactGroup, hideDayTitle)).join("");
+            if (flattenSection) {
+              return dayTreeHtml;
+            }
             return `
               <details class="tree group" open>
                 <summary>
@@ -551,53 +640,13 @@
           const groups = isUnscheduled
             ? [{ title: "Idopont nelkul", meta: "", days: [{ key: "__unscheduled__", title: "Idopont nelkul", date: "", blocks: [{ key: "__unscheduled__", title: "Idopont nelkul", lane: "parking" }] }] }]
             : (section.groups || []);
+          const flattenSection = groups.length === 1 && (groups[0].title || "") === (section.title || "");
           const groupsHtml = groups.map(group => {
-            const daysHtml = (group.days || []).map(day => {
-            const blocks = (day.blocks || []).map(bucket => {
-              const lane = bucket.lane || "session";
-              const style = laneStyles[lane] || laneStyles.session;
-              const entries = (taskByBucket.get(bucket.key) || []).slice().sort((a, b) => {
-                const left = a.focus_rank == null ? 9999 : a.focus_rank;
-                const right = b.focus_rank == null ? 9999 : b.focus_rank;
-                return left - right;
-              });
-              const taskMarkup = entries.length
-                ? entries.map(task => `
-                  <div class="task" draggable="true" data-record-id="${escapeHtml(task.record_id)}" style="--bucket-accent:${style.accent};">
-                    <div class="task-title">${escapeHtml(task.title)}</div>
-                    <div class="task-meta">${escapeHtml(task.project || "-")} / ${escapeHtml(task.case_name || "-")}</div>
-                  </div>
-                `).join("")
-                : `<div class="empty">Ures blokk</div>`;
-              return `
-                <div class="bucket" data-bucket-key="${escapeHtml(bucket.key)}" style="--bucket-bg:${style.bg};--bucket-accent:${style.accent};">
-                  <div class="bucket-header">
-                    <div style="display:flex;align-items:center;justify-content:space-between;gap:8px;">
-                      <div class="bucket-title">${escapeHtml(bucket.title)}</div>
-                      ${bucket.lane === "session" ? `<button class="mini-btn danger" data-remove-block="${escapeHtml(bucket.key)}">×</button>` : ``}
-                    </div>
-                    <div class="bucket-subtitle">${escapeHtml(day.title)}</div>
-                  </div>
-                  <div class="task-list">${taskMarkup}</div>
-                </div>
-              `;
-            }).join("");
-            return `
-              <details class="tree day" open>
-                <summary class="day-header" id="anchor-${escapeHtml(day.key || day.title)}">
-                  <button class="toggle" type="button" aria-label="Nyitas-zaras"></button>
-                  <span>
-                    <div class="day-title">${escapeHtml(day.title)}</div>
-                    <div class="day-date">${escapeHtml(day.date || "")}</div>
-                  </span>
-                  ${day.key !== "__unscheduled__" ? `<button class="mini-btn" data-add-block-day="${escapeHtml(day.key || "")}">+</button><button class="mini-btn" data-rename-day="${escapeHtml(day.key || "")}" data-current-title="${escapeHtml(day.title || "")}">✎</button>` : ``}
-                </summary>
-                <div class="section-body">
-                  <div class="blocks">${blocks}</div>
-                </div>
-              </details>
-            `;
-            }).join("");
+            const compactGroup = (group.days || []).length === 1 && (group.days[0].title || "") === (group.title || "");
+            const daysHtml = (group.days || []).map(day => renderBoardDay(day, compactGroup, compactGroup)).join("");
+            if (flattenSection) {
+              return daysHtml;
+            }
             return `
               <details class="tree group" open id="anchor-group-${escapeHtml(group.key || group.title)}">
                 <summary>

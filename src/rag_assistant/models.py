@@ -66,6 +66,9 @@ class KnowledgeRecord:
     due_at: str | None = None
     deadline: str | None = None
     event_at: str | None = None
+    next_step: str = ""
+    next_step_estimate: str = ""
+    next_steps: list[dict] = field(default_factory=list)
     planning_bucket: str = ""
     planning_order: int | None = None
     focus_rank: int | None = None
@@ -97,6 +100,9 @@ class KnowledgeRecord:
         payload.setdefault("due_at", None)
         payload.setdefault("deadline", None)
         payload.setdefault("event_at", None)
+        payload.setdefault("next_step", "")
+        payload.setdefault("next_step_estimate", "")
+        payload.setdefault("next_steps", [])
         payload.setdefault("planning_bucket", "")
         payload.setdefault("planning_order", None)
         payload.setdefault("focus_rank", None)
@@ -112,6 +118,13 @@ class KnowledgeRecord:
             self.case_name,
             self.summary,
             self.content,
+            self.next_step,
+            self.next_step_estimate,
+            " ".join(
+                " ".join(str(item.get(part, "")) for part in ["title", "estimate", "done"])
+                for item in self.next_steps
+                if isinstance(item, dict)
+            ),
             " ".join(self.related_people),
             " ".join(self.tags),
             " ".join(self.relations),
@@ -139,6 +152,8 @@ class KnowledgeRecord:
             "due_at": self.due_at or "",
             "deadline": self.deadline or "",
             "event_at": self.event_at or "",
+            "next_step": self.next_step,
+            "next_step_estimate": self.next_step_estimate,
             "planning_bucket": self.planning_bucket,
             "focus_rank": self.focus_rank if self.focus_rank is not None else "",
             "updated_at": self.updated_at,

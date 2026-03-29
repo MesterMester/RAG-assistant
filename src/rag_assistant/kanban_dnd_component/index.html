@@ -1,0 +1,72 @@
+<!doctype html>
+<html>
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <style>
+      body { margin: 0; padding: 12px; font-family: Georgia, "Times New Roman", serif; background: linear-gradient(180deg,#fffefb,#f8fafc); }
+      .board { display: grid; grid-template-columns: repeat(7, minmax(180px, 1fr)); gap: 12px; }
+      .col { border: 1px solid #e2e8f0; border-radius: 18px; background: rgba(255,255,255,0.88); min-height: 280px; padding: 10px; }
+      .col.drag-over { border-color: #0f172a; background: #fff7ed; }
+      .head { font-weight: 700; margin-bottom: 10px; }
+      .card { background: white; border-left: 4px solid #334155; border-radius: 14px; padding: 10px 12px; box-shadow: 0 4px 14px rgba(15,23,42,0.08); margin-bottom: 8px; cursor: grab; }
+      .card.dragging { opacity: 0.45; }
+      .meta { color: #64748b; font-size: 12px; margin-top: 2px; }
+      .empty { color: #94a3b8; font-size: 12px; border: 1px dashed #cbd5e1; border-radius: 12px; padding: 10px; }
+      @media (max-width: 1100px) { .board { grid-template-columns: repeat(2, minmax(180px, 1fr)); } }
+    </style>
+  </head>
+  <body>
+    <div id="app"></div>
+    <script>
+      let dragRecordId = null;
+      function post(type, data) { window.parent.postMessage({ isStreamlitMessage: true, type, ...data }, "*"); }
+      function setHeight() { post("streamlit:setFrameHeight", { height: document.documentElement.scrollHeight || 600 }); }
+      function sendValue(value) { post("streamlit:setComponentValue", { value, dataType: "json" }); }
+      function esc(value) { return String(value ?? "").replaceAll("&","&amp;").replaceAll("<","&lt;").replaceAll(">","&gt;").replaceAll('"',"&quot;"); }
+      window.addEventListener("message", event => {
+        const message = event.data;
+        if (!message || message.type !== "streamlit:render") return;
+        const payload = message.args.payload || {};
+        const statuses = payload.statuses || [];
+        const items = payload.items || [];
+        const byStatus = new Map();
+        items.forEach(item => {
+          const key = item.status || "inbox";
+          if (!byStatus.has(key)) byStatus.set(key, []);
+          byStatus.get(key).push(item);
+        });
+        const html = `<div class="board">` + statuses.map(status => {
+          const cards = (byStatus.get(status.key) || []).map(item => `
+            <div class="card" draggable="true" data-record-id="${esc(item.record_id)}">
+              <div>${esc(item.title)}</div>
+              <div class="meta">${esc(item.entity_type)} / ${esc(item.project || "-")}</div>
+            </div>
+          `).join("") || `<div class="empty">Nincs elem</div>`;
+          return `<div class="col" data-status="${esc(status.key)}"><div class="head">${esc(status.title)}</div>${cards}</div>`;
+        }).join("") + `</div>`;
+        const app = document.getElementById("app");
+        app.innerHTML = html;
+        app.querySelectorAll(".card").forEach(card => {
+          card.addEventListener("dragstart", e => { dragRecordId = card.dataset.recordId; card.classList.add("dragging"); e.dataTransfer.setData("text/plain", dragRecordId || ""); });
+          card.addEventListener("dragend", () => { dragRecordId = null; card.classList.remove("dragging"); app.querySelectorAll(".col").forEach(col => col.classList.remove("drag-over")); });
+        });
+        app.querySelectorAll(".col").forEach(col => {
+          col.addEventListener("dragover", e => { e.preventDefault(); col.classList.add("drag-over"); });
+          col.addEventListener("dragleave", () => col.classList.remove("drag-over"));
+          col.addEventListener("drop", e => {
+            e.preventDefault();
+            col.classList.remove("drag-over");
+            const recordId = dragRecordId || e.dataTransfer.getData("text/plain");
+            const status = col.dataset.status || "";
+            if (recordId && status) {
+              sendValue({ action: "move_status", event_id: `${Date.now()}-${Math.random().toString(16).slice(2)}`, record_id: recordId, status });
+            }
+          });
+        });
+        setTimeout(setHeight, 0);
+      });
+      window.addEventListener("load", () => { post("streamlit:componentReady", { apiVersion: 1 }); setHeight(); });
+    </script>
+  </body>
+</html>
