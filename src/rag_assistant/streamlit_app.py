@@ -9,6 +9,7 @@ import streamlit as st
 import streamlit.components.v1 as components
 
 from rag_assistant.config import load_config
+from rag_assistant.context_graph_component import context_graph
 from rag_assistant.execution_dnd_component import execution_dnd_board
 from rag_assistant.index_store import load_index, save_index
 from rag_assistant.ingest import build_index
@@ -951,6 +952,144 @@ def build_mindmap_lines(records: list[KnowledgeRecord]) -> list[str]:
     return lines
 
 
+def filter_context_graph_records(
+    records: list[KnowledgeRecord],
+    entity_filters: list[str],
+    status_filters: list[str],
+    project_filter: str,
+    case_filter: str,
+    active_only: bool,
+    due_from: date | None,
+    due_to: date | None,
+) -> list[KnowledgeRecord]:
+    filtered = records
+    if entity_filters:
+        filtered = [record for record in filtered if record.entity_type in entity_filters]
+    if status_filters:
+        filtered = [record for record in filtered if record.status in status_filters]
+    if project_filter.strip():
+        needle = project_filter.strip().lower()
+        filtered = [record for record in filtered if needle in record.project.lower()]
+    if case_filter.strip():
+        needle = case_filter.strip().lower()
+        filtered = [record for record in filtered if needle in record.case_name.lower()]
+    if active_only:
+        filtered = [record for record in filtered if record.status in {"inbox", "next", "active", "waiting"}]
+    if due_from:
+        due_from_iso = due_from.isoformat()
+        filtered = [record for record in filtered if record.due_at and record.due_at >= due_from_iso]
+    if due_to:
+        due_to_iso = due_to.isoformat()
+        filtered = [record for record in filtered if record.due_at and record.due_at <= due_to_iso]
+    return filtered
+
+
+def build_context_graph_payload(records: list[KnowledgeRecord], selected_node_id: str, show_relations: bool, show_only_hierarchy: bool) -> dict:
+    filtered_lookup = {record.record_id: record for record in records}
+    hierarchy_lookup: dict[str, str] = {}
+    nodes: dict[str, dict] = {}
+    edges: list[dict] = []
+    edge_keys: set[tuple[str, str, str]] = set()
+
+    def synthetic_id(kind: str, *parts: str) -> str:
+        return f"{kind}::" + "::".join(part for part in parts if part)
+
+    def add_node(node_id: str, label: str, entity_type: str, status: str = "", project: str = "", case_name: str = "", due_at: str | None = None, synthetic: bool = False) -> None:
+        if node_id in nodes:
+            return
+        nodes[node_id] = {
+            "id": node_id,
+            "label": label,
+            "entity_type": entity_type,
+            "status": status,
+            "project": project,
+            "case_name": case_name,
+            "due_at": due_at or "",
+            "synthetic": synthetic,
+        }
+
+    def add_edge(source: str, target: str, kind: str) -> None:
+        if not source or not target or source == target:
+            return
+        edge_key = (source, target, kind)
+        if edge_key in edge_keys:
+            return
+        edge_keys.add(edge_key)
+        edges.append({"id": f"{kind}:{source}:{target}", "source": source, "target": target, "kind": kind})
+
+    for record in records:
+        add_node(
+            record.record_id,
+            record.title,
+            record.entity_type,
+            status=record.status,
+            project=record.project,
+            case_name=record.case_name,
+            due_at=record.due_at,
+            synthetic=False,
+        )
+        if record.entity_type == "organization" and record.organization:
+            hierarchy_lookup[synthetic_id("organization", record.organization)] = record.record_id
+        if record.entity_type == "team" and record.organization and record.team:
+            hierarchy_lookup[synthetic_id("team", record.organization, record.team)] = record.record_id
+        if record.entity_type == "project" and record.organization and record.team and record.project:
+            hierarchy_lookup[synthetic_id("project", record.organization, record.team, record.project)] = record.record_id
+        if record.entity_type == "case" and record.organization and record.team and record.project and record.case_name:
+            hierarchy_lookup[synthetic_id("case", record.organization, record.team, record.project, record.case_name)] = record.record_id
+
+    def ensure_hierarchy_node(kind: str, label: str, *parts: str) -> str:
+        synth_id = synthetic_id(kind, *parts)
+        existing = hierarchy_lookup.get(synth_id)
+        if existing:
+            return existing
+        add_node(synth_id, label, kind, synthetic=True)
+        hierarchy_lookup[synth_id] = synth_id
+        return synth_id
+
+    for record in records:
+        org_node = None
+        team_node = None
+        project_node = None
+        case_node = None
+
+        if record.organization:
+            org_node = ensure_hierarchy_node("organization", record.organization, record.organization)
+        if record.organization and record.team:
+            team_node = ensure_hierarchy_node("team", record.team, record.organization, record.team)
+            if org_node:
+                add_edge(org_node, team_node, "hierarchy")
+        if record.organization and record.team and record.project:
+            project_node = ensure_hierarchy_node("project", record.project, record.organization, record.team, record.project)
+            if team_node:
+                add_edge(team_node, project_node, "hierarchy")
+            elif org_node:
+                add_edge(org_node, project_node, "hierarchy")
+        if record.organization and record.team and record.project and record.case_name:
+            case_node = ensure_hierarchy_node("case", record.case_name, record.organization, record.team, record.project, record.case_name)
+            if project_node:
+                add_edge(project_node, case_node, "hierarchy")
+
+        if record.entity_type not in {"organization", "team", "project", "case"}:
+            if record.parent_id and record.parent_id in filtered_lookup:
+                add_edge(record.parent_id, record.record_id, "hierarchy")
+            else:
+                parent_node = case_node or project_node or team_node or org_node
+                if parent_node:
+                    add_edge(parent_node, record.record_id, "hierarchy")
+
+        if show_relations and not show_only_hierarchy:
+            for relation_id in record.relations:
+                if relation_id in filtered_lookup:
+                    add_edge(record.record_id, relation_id, "relation")
+
+    return {
+        "mode": "mindmap",
+        "selected_node_id": selected_node_id,
+        "nodes": list(nodes.values()),
+        "edges": [edge for edge in edges if not show_only_hierarchy or edge["kind"] == "hierarchy"],
+    }
+
+
 def render_mindmap_svg(records: list[KnowledgeRecord]) -> str | None:
     dot_input = "\n".join(build_mindmap_lines(records))
     try:
@@ -1654,65 +1793,119 @@ def app() -> None:
                 """,
                 unsafe_allow_html=True,
             )
-            svg = render_mindmap_svg(records)
-            if svg:
-                components.html(render_interactive_mindmap(svg), height=820, scrolling=False)
-            else:
-                st.graphviz_chart("\n".join(build_mindmap_lines(records)), use_container_width=True)
-            selected_id = st.selectbox(
-                "Rekord megnyitasa a mindmapbol",
-                options=[record.record_id for record in records],
-                format_func=lambda record_id: record_label(next(record for record in records if record.record_id == record_id)),
-                key="mindmap_record_picker",
+
+            filter_col1, filter_col2, filter_col3 = st.columns(3)
+            filter_entities = filter_col1.multiselect(
+                "Entitas szures",
+                options=ENTITY_OPTIONS,
+                default=st.session_state.get("context_graph_entities", []),
+                key="context_graph_entities",
             )
-            selected_record_mindmap = next(record for record in records if record.record_id == selected_id)
+            filter_statuses = filter_col2.multiselect(
+                "Statusz szures",
+                options=STATUS_OPTIONS,
+                default=st.session_state.get("context_graph_statuses", []),
+                key="context_graph_statuses",
+            )
+            active_only = filter_col3.checkbox("Csak aktivak", value=st.session_state.get("context_graph_active_only", True), key="context_graph_active_only")
 
-            edit_col1, edit_col2 = st.columns(2)
-            with edit_col1:
-                new_parent = render_parent_selector(records, selected_record_mindmap.parent_id, "mindmap")
-            with edit_col2:
-                new_relations = render_relations_selector(records, selected_record_mindmap.relations, "mindmap")
+            filter_col4, filter_col5, filter_col6, filter_col7 = st.columns(4)
+            context_project = filter_col4.text_input("Projekt szures", key="context_graph_project")
+            context_case = filter_col5.text_input("Ugy szures", key="context_graph_case")
+            context_due_from = filter_col6.date_input("Due - tol", value=st.session_state.get("context_graph_due_from"), key="context_graph_due_from")
+            context_due_to = filter_col7.date_input("Due - ig", value=st.session_state.get("context_graph_due_to"), key="context_graph_due_to")
 
-            planning_col1, planning_col2 = st.columns(2)
-            with planning_col1:
-                moved_bucket = st.selectbox(
-                    "Athelyezes az execution graphban",
-                    planning_options,
-                    index=planning_options.index(selected_record_mindmap.planning_bucket) if selected_record_mindmap.planning_bucket in planning_options else 0,
-                    format_func=lambda value: planning_bucket_label(value, planning_titles),
-                    key="mindmap_planning_bucket",
-                )
-            with planning_col2:
-                moved_focus_rank = st.number_input(
-                    "Fo fokusz sorrend",
-                    min_value=1,
-                    step=1,
-                    value=selected_record_mindmap.focus_rank or 1,
-                    key="mindmap_focus_rank",
-                )
+            toggle_col1, toggle_col2 = st.columns(2)
+            show_relations = toggle_col1.checkbox("Relaciok mutatasa", value=st.session_state.get("context_graph_show_relations", True), key="context_graph_show_relations")
+            show_only_hierarchy = toggle_col2.checkbox("Csak hierarchia", value=st.session_state.get("context_graph_only_hierarchy", False), key="context_graph_only_hierarchy")
 
-            button_col1, button_col2, button_col3 = st.columns(3)
-            with button_col1:
-                if st.button("Kapcsolatok mentese", key="save_from_mindmap"):
-                    updated_record = update_record(
-                        selected_record_mindmap,
-                        parent_id=new_parent,
-                        relations=list(new_relations),
+            filtered_graph_records = filter_context_graph_records(
+                records,
+                filter_entities,
+                filter_statuses,
+                context_project,
+                context_case,
+                active_only,
+                context_due_from,
+                context_due_to,
+            )
+
+            if not filtered_graph_records:
+                st.info("A szurok mellett nincs megjelenitheto rekord.")
+            else:
+                selected_record_id = st.session_state.get("context_graph_selected_record_id")
+                filtered_ids = {record.record_id for record in filtered_graph_records}
+                if selected_record_id not in filtered_ids:
+                    selected_record_id = filtered_graph_records[0].record_id
+                    st.session_state["context_graph_selected_record_id"] = selected_record_id
+
+                graph_col, editor_col = st.columns([2.2, 1.1])
+                with graph_col:
+                    graph_payload = build_context_graph_payload(
+                        filtered_graph_records,
+                        selected_record_id,
+                        show_relations,
+                        show_only_hierarchy,
                     )
-                    persist_record(updated_record, source_dir, config, records_path, index_path, chroma_dir)
-            with button_col2:
-                if st.button("Athelyezes mentese", key="move_from_mindmap"):
-                    updated_record = update_record(
-                        selected_record_mindmap,
-                        planning_bucket=moved_bucket,
-                        focus_rank=int(moved_focus_rank) if moved_bucket == "main_focus" else None,
-                    )
-                    persist_record(updated_record, source_dir, config, records_path, index_path, chroma_dir)
-            with button_col3:
-                if st.button("Megnyit a reszletnezetben", key="open_from_mindmap"):
-                    st.session_state["selected_record_id"] = selected_id
-                    st.rerun()
-            st.caption("A graf a szervezeti hierarchiat, a primary parent kapcsolatot es a tovabbi relaciokat is megjeleniti. A bucket-athelyezes itt most stabil, mentett muveletkent erheto el; a teljes vasznon beluli drag-and-drop egy kovetkezo lepeshez kulon Streamlit komponens lenne az idealis irany.")
+                    graph_result = context_graph(graph_payload, key="context_graph_surface")
+                    if isinstance(graph_result, dict) and graph_result.get("action") == "select_node":
+                        event_id = str(graph_result.get("event_id", "")).strip()
+                        if not event_id or st.session_state.get("last_context_graph_event") != event_id:
+                            if event_id:
+                                st.session_state["last_context_graph_event"] = event_id
+                            record_id = str(graph_result.get("record_id", "")).strip()
+                            if record_id and record_id in {record.record_id for record in records}:
+                                st.session_state["context_graph_selected_record_id"] = record_id
+                                st.rerun()
+
+                with editor_col:
+                    selected_record = next((record for record in records if record.record_id == st.session_state.get("context_graph_selected_record_id")), None)
+                    if selected_record is None:
+                        st.info("Valassz ki egy rekordot a grafon.")
+                    else:
+                        st.caption(f"Kijelolt rekord: {record_label(selected_record)}")
+                        edit_values = render_record_editor(
+                            "context_graph_edit",
+                            records,
+                            existing_values,
+                            planning_options,
+                            planning_titles,
+                            base_record=selected_record,
+                        )
+                        if st.button("Context Graph rekord mentese", key="save_context_graph_record"):
+                            updated_record = update_record(
+                                selected_record,
+                                title=edit_values["title"],
+                                summary=edit_values["summary"],
+                                content=edit_values["content"],
+                                entity_type=edit_values["entity_type"],
+                                status=edit_values["status"],
+                                organization=edit_values["organization"],
+                                team=edit_values["team"],
+                                project=edit_values["project"],
+                                case_name=edit_values["case_name"],
+                                parent_id=edit_values["parent_id"],
+                                related_people=edit_values["related_people"],
+                                tags=edit_values["tags"],
+                                relations=edit_values["relations"],
+                                decision_needed=edit_values["decision_needed"],
+                                decision_context=edit_values["decision_context"],
+                                start_at=edit_values["start_at"],
+                                due_at=edit_values["due_at"],
+                                deadline=edit_values["deadline"],
+                                event_at=edit_values["event_at"],
+                                next_step=edit_values["next_step"],
+                                next_step_estimate=edit_values["next_step_estimate"],
+                                next_steps=edit_values["next_steps"],
+                                planning_bucket=edit_values["planning_bucket"],
+                                focus_rank=edit_values["focus_rank"],
+                            )
+                            persist_record(with_synced_hierarchy_title(updated_record), source_dir, config, records_path, index_path, chroma_dir)
+                        if st.button("Megnyit a reszletnezetben", key="open_from_context_graph"):
+                            st.session_state["selected_record_id"] = selected_record.record_id
+                            st.rerun()
+
+                st.caption("Phase A: szurheto, kattinthato es ugyanazon a tabon szerkesztheto Context Graph. A teljes vizualis edge-szerkesztes es a kulon Graph nezet a kovetkezo fazisba tartozik.")
 
     with tab_search:
         st.subheader("Kereses")

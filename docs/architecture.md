@@ -36,3 +36,5 @@ See:
 - `docs/importer-upserter.md`
 - `docs/graph-views.md`
 - `docs/phase-1-implementation-plan.md`
+- `docs/context-graph-2.0-spec.md`
+- `docs/context-graph-phase-a-plan.md`

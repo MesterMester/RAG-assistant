@@ -1,0 +1,371 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>Context Graph</title>
+    <style>
+      :root {
+        color-scheme: light;
+        --bg: #fffdf8;
+        --panel: rgba(255, 255, 255, 0.92);
+        --line: #dbe4ee;
+        --text: #0f172a;
+        --muted: #64748b;
+      }
+      * { box-sizing: border-box; }
+      body {
+        margin: 0;
+        padding: 12px;
+        height: 100vh;
+        overflow: hidden;
+        background:
+          radial-gradient(circle at top left, rgba(251, 191, 36, 0.12), transparent 26%),
+          radial-gradient(circle at top right, rgba(59, 130, 246, 0.12), transparent 24%),
+          linear-gradient(180deg, #fffefb 0%, #f8fafc 100%);
+        color: var(--text);
+        font-family: Georgia, "Times New Roman", serif;
+      }
+      #app {
+        height: calc(100vh - 24px);
+        display: flex;
+        flex-direction: column;
+        gap: 12px;
+      }
+      .note {
+        padding: 10px 14px;
+        border: 1px solid var(--line);
+        border-radius: 18px;
+        background: var(--panel);
+        font-size: 13px;
+        color: var(--muted);
+      }
+      .shell {
+        flex: 1 1 auto;
+        min-height: 0;
+        position: relative;
+        overflow: hidden;
+        border: 1px solid var(--line);
+        border-radius: 24px;
+        background: rgba(255,255,255,0.75);
+      }
+      .viewport {
+        width: 100%;
+        height: 100%;
+        overflow: auto;
+        position: relative;
+      }
+      .canvas {
+        position: relative;
+        min-width: 100%;
+        min-height: 100%;
+      }
+      svg.edges {
+        position: absolute;
+        inset: 0;
+        width: 100%;
+        height: 100%;
+        pointer-events: none;
+        overflow: visible;
+      }
+      .nodes {
+        position: relative;
+        min-height: 100%;
+      }
+      .node {
+        position: absolute;
+        width: 180px;
+        min-height: 74px;
+        padding: 10px 12px;
+        border-radius: 18px;
+        background: rgba(255,255,255,0.96);
+        border: 1px solid var(--accent, #cbd5e1);
+        box-shadow: 0 10px 20px rgba(15, 23, 42, 0.08);
+        cursor: pointer;
+      }
+      .node.synthetic {
+        opacity: 0.88;
+      }
+      .node.selected {
+        box-shadow: 0 0 0 3px rgba(15, 23, 42, 0.12), 0 12px 24px rgba(15, 23, 42, 0.12);
+        transform: translateY(-1px);
+      }
+      .node-title {
+        font-weight: 700;
+        font-size: 14px;
+        margin-bottom: 4px;
+      }
+      .node-meta {
+        font-size: 11px;
+        color: var(--muted);
+        display: flex;
+        flex-wrap: wrap;
+        gap: 6px;
+      }
+      .chip {
+        display: inline-flex;
+        align-items: center;
+        gap: 4px;
+        padding: 2px 7px;
+        border-radius: 999px;
+        background: rgba(148, 163, 184, 0.14);
+      }
+      .shape {
+        width: 12px;
+        height: 12px;
+        border: 1px solid rgba(15, 23, 42, 0.42);
+        background: var(--accent, #cbd5e1);
+        display: inline-block;
+      }
+      .shape.circle { border-radius: 999px; }
+      .shape.diamond { transform: rotate(45deg); }
+      .shape.hex {
+        clip-path: polygon(25% 0%,75% 0%,100% 50%,75% 100%,25% 100%,0% 50%);
+      }
+      .shape.arrow {
+        clip-path: polygon(0 22%,68% 22%,68% 0,100% 50%,68% 100%,68% 78%,0 78%);
+      }
+      .shape.note {
+        clip-path: polygon(0 0,100% 0,100% 78%,66% 78%,66% 100%,50% 78%,0 78%);
+      }
+      .shape.tab {
+        clip-path: polygon(0 0,78% 0,78% 20%,100% 20%,100% 100%,0 100%);
+      }
+      .edge-hierarchy {
+        stroke: rgba(71, 85, 105, 0.55);
+        stroke-width: 2;
+        fill: none;
+      }
+      .edge-relation {
+        stroke: rgba(96, 165, 250, 0.55);
+        stroke-width: 1.6;
+        fill: none;
+        stroke-dasharray: 6 5;
+      }
+      @media (max-width: 980px) {
+        body {
+          height: auto;
+          overflow: auto;
+        }
+        #app {
+          height: auto;
+        }
+        .shell {
+          min-height: 720px;
+        }
+      }
+    </style>
+  </head>
+  <body>
+    <div id="app"></div>
+    <script>
+      const shapeByEntity = {
+        organization: "circle",
+        team: "hex",
+        project: "square",
+        case: "tab",
+        task: "arrow",
+        decision: "diamond",
+        event: "square",
+        person: "square",
+        note: "note",
+        source_item: "tab",
+      };
+
+      const colorByEntity = {
+        organization: "#BFDBFE",
+        team: "#67E8F9",
+        project: "#86EFAC",
+        case: "#F9A8D4",
+        task: "#FDE68A",
+        decision: "#FDA4AF",
+        event: "#C4B5FD",
+        person: "#FFF8E7",
+        note: "#F5F5F4",
+        source_item: "#CBD5E1",
+        synthetic: "#E2E8F0",
+      };
+
+      function postMessageToStreamlit(type, data) {
+        window.parent.postMessage({ isStreamlitMessage: true, type, ...data }, "*");
+      }
+
+      function setFrameHeight() {
+        const desktopHeight = Math.max(720, Math.min(window.innerHeight - 24, 1080));
+        const mobileHeight = document.documentElement.scrollHeight || document.body.scrollHeight || 900;
+        const height = window.innerWidth <= 980 ? mobileHeight : desktopHeight;
+        postMessageToStreamlit("streamlit:setFrameHeight", { height });
+      }
+
+      function sendEvent(payload) {
+        postMessageToStreamlit("streamlit:setComponentValue", {
+          value: { event_id: `${Date.now()}-${Math.random().toString(16).slice(2)}`, ...payload },
+          dataType: "json",
+        });
+      }
+
+      function escapeHtml(value) {
+        return String(value ?? "")
+          .replaceAll("&", "&amp;")
+          .replaceAll("<", "&lt;")
+          .replaceAll(">", "&gt;")
+          .replaceAll('"', "&quot;")
+          .replaceAll("'", "&#039;");
+      }
+
+      function computeLayout(payload) {
+        const nodes = payload.nodes || [];
+        const edges = payload.edges || [];
+        const hierarchyEdges = edges.filter(edge => edge.kind === "hierarchy");
+        const incoming = new Map();
+        const outgoing = new Map();
+        nodes.forEach(node => {
+          incoming.set(node.id, []);
+          outgoing.set(node.id, []);
+        });
+        hierarchyEdges.forEach(edge => {
+          if (incoming.has(edge.target)) incoming.get(edge.target).push(edge.source);
+          if (outgoing.has(edge.source)) outgoing.get(edge.source).push(edge.target);
+        });
+
+        const roots = nodes
+          .filter(node => (incoming.get(node.id) || []).length === 0)
+          .sort((a, b) => String(a.label || "").localeCompare(String(b.label || "")));
+
+        const levelById = new Map();
+        const queue = roots.map(node => ({ id: node.id, level: 0 }));
+        while (queue.length) {
+          const item = queue.shift();
+          if (!item) break;
+          const known = levelById.get(item.id);
+          if (known != null && known <= item.level) continue;
+          levelById.set(item.id, item.level);
+          (outgoing.get(item.id) || []).forEach(target => queue.push({ id: target, level: item.level + 1 }));
+        }
+        nodes.forEach(node => {
+          if (!levelById.has(node.id)) levelById.set(node.id, 0);
+        });
+
+        const columns = new Map();
+        nodes.forEach(node => {
+          const level = levelById.get(node.id) || 0;
+          if (!columns.has(level)) columns.set(level, []);
+          columns.get(level).push(node);
+        });
+
+        Array.from(columns.values()).forEach(column => {
+          column.sort((a, b) => {
+            const aGroup = `${a.project || ""}/${a.case_name || ""}/${a.label || ""}`;
+            const bGroup = `${b.project || ""}/${b.case_name || ""}/${b.label || ""}`;
+            return aGroup.localeCompare(bGroup);
+          });
+        });
+
+        const positions = new Map();
+        const nodeWidth = 180;
+        const nodeHeight = 92;
+        const colGap = 120;
+        const rowGap = 44;
+        const marginX = 36;
+        const marginY = 24;
+        let maxY = 0;
+        Array.from(columns.keys()).sort((a, b) => a - b).forEach(level => {
+          const column = columns.get(level) || [];
+          column.forEach((node, index) => {
+            const x = marginX + level * (nodeWidth + colGap);
+            const y = marginY + index * (nodeHeight + rowGap);
+            positions.set(node.id, { x, y, w: nodeWidth, h: nodeHeight });
+            maxY = Math.max(maxY, y + nodeHeight);
+          });
+        });
+
+        return {
+          positions,
+          width: Math.max(980, marginX * 2 + (Math.max(...Array.from(columns.keys()), 0) + 1) * (nodeWidth + colGap)),
+          height: Math.max(720, maxY + 40),
+        };
+      }
+
+      function edgePath(source, target) {
+        const startX = source.x + source.w;
+        const startY = source.y + source.h / 2;
+        const endX = target.x;
+        const endY = target.y + target.h / 2;
+        const dx = Math.max(40, (endX - startX) * 0.45);
+        return `M ${startX} ${startY} C ${startX + dx} ${startY}, ${endX - dx} ${endY}, ${endX} ${endY}`;
+      }
+
+      function render(payload) {
+        const app = document.getElementById("app");
+        const nodes = payload.nodes || [];
+        const edges = payload.edges || [];
+        const selectedId = payload.selected_node_id || "";
+        const layout = computeLayout(payload);
+
+        const nodeMarkup = nodes.map(node => {
+          const pos = layout.positions.get(node.id);
+          const entityType = node.entity_type || (node.synthetic ? "synthetic" : "note");
+          const accent = colorByEntity[entityType] || colorByEntity.synthetic;
+          const shape = shapeByEntity[entityType] || "square";
+          const chips = [
+            node.entity_type ? `<span class="chip">${escapeHtml(node.entity_type)}</span>` : ``,
+            node.status ? `<span class="chip">${escapeHtml(node.status)}</span>` : ``,
+            node.due_at ? `<span class="chip">due ${escapeHtml(node.due_at)}</span>` : ``,
+          ].filter(Boolean).join("");
+          return `
+            <div
+              class="node ${node.synthetic ? `synthetic` : ``} ${selectedId === node.id ? `selected` : ``}"
+              data-node-id="${escapeHtml(node.id)}"
+              style="left:${pos.x}px;top:${pos.y}px;--accent:${accent};"
+            >
+              <div class="node-title"><span class="shape ${shape}" style="--accent:${accent};margin-right:8px;"></span>${escapeHtml(node.label)}</div>
+              <div class="node-meta">${chips}</div>
+            </div>
+          `;
+        }).join("");
+
+        const edgeMarkup = edges.map(edge => {
+          const source = layout.positions.get(edge.source);
+          const target = layout.positions.get(edge.target);
+          if (!source || !target) return "";
+          const className = edge.kind === "relation" ? "edge-relation" : "edge-hierarchy";
+          return `<path class="${className}" d="${edgePath(source, target)}"></path>`;
+        }).join("");
+
+        app.innerHTML = `
+          <div class="note">Context Graph Phase A: kattints egy node-ra a helyben szerkesztheto rekord kivalasztasahoz.</div>
+          <div class="shell">
+            <div class="viewport">
+              <div class="canvas" style="width:${layout.width}px;height:${layout.height}px;">
+                <svg class="edges" viewBox="0 0 ${layout.width} ${layout.height}" preserveAspectRatio="xMinYMin meet">${edgeMarkup}</svg>
+                <div class="nodes">${nodeMarkup}</div>
+              </div>
+            </div>
+          </div>
+        `;
+
+        app.querySelectorAll("[data-node-id]").forEach(nodeEl => {
+          nodeEl.addEventListener("click", () => {
+            const recordId = nodeEl.dataset.nodeId || "";
+            if (recordId) {
+              sendEvent({ action: "select_node", record_id: recordId });
+            }
+          });
+        });
+
+        setTimeout(setFrameHeight, 0);
+      }
+
+      window.addEventListener("message", event => {
+        const message = event.data;
+        if (!message || message.type !== "streamlit:render") return;
+        render(message.args.payload || {});
+      });
+
+      window.addEventListener("load", () => {
+        postMessageToStreamlit("streamlit:componentReady", { apiVersion: 1 });
+        setFrameHeight();
+      });
+    </script>
+  </body>
+</html>
