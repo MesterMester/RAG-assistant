@@ -504,6 +504,18 @@
         render(payload);
       }
 
+      function computeFitState(payload, viewport, pad) {
+        const layout = computeLayout(payload);
+        const availableWidth = Math.max(320, viewport.clientWidth - 80);
+        const availableHeight = Math.max(240, viewport.clientHeight - 80);
+        const zoom = Math.max(0.12, Math.min(2.6, Math.min(availableWidth / Math.max(layout.width, 1), availableHeight / Math.max(layout.height, 1))));
+        return {
+          zoom,
+          left: Math.max(0, pad + (layout.width * zoom - viewport.clientWidth) / 2),
+          top: Math.max(0, pad + (layout.height * zoom - viewport.clientHeight) / 2),
+        };
+      }
+
       function persistViewport(viewport) {
         if (!viewport) return;
         sessionStorage.setItem(storageKey("scroll_left"), String(viewport.scrollLeft));
@@ -517,7 +529,7 @@
           const edges = payload.edges || [];
           const selectedId = payload.selected_node_id || "";
           const layout = computeLayout(payload);
-          const zoom = Math.max(0.12, Math.min(3.2, readNumberStorage(storageKey("zoom"), 1)));
+          const viewportZoom = Math.max(0.12, Math.min(3.2, readNumberStorage(storageKey("zoom"), 1)));
           const pad = 1200;
 
           const nodeMarkup = nodes.map((node, index) => {
@@ -567,8 +579,8 @@
             </div>
             <div class="shell">
               <div class="viewport">
-                <div class="canvas-shell" style="width:${layout.width * zoom + pad * 2}px;height:${layout.height * zoom + pad * 2}px;">
-                  <div class="scene" style="left:${pad}px;top:${pad}px;width:${layout.width}px;height:${layout.height}px;transform:scale(${zoom});">
+                <div class="canvas-shell" style="width:${layout.width * viewportZoom + pad * 2}px;height:${layout.height * viewportZoom + pad * 2}px;">
+                  <div class="scene" style="left:${pad}px;top:${pad}px;width:${layout.width}px;height:${layout.height}px;transform:scale(${viewportZoom});">
                     <div class="canvas" style="width:${layout.width}px;height:${layout.height}px;">
                       <svg class="edges" viewBox="0 0 ${layout.width} ${layout.height}" preserveAspectRatio="xMinYMin meet">${edgeMarkup}</svg>
                       ${nodeMarkup}
@@ -585,11 +597,13 @@
             button.addEventListener("click", () => {
               const action = button.dataset.action || "";
               if (action === "fit" && viewport) {
+                sessionStorage.setItem(storageKey("auto_fit_done"), "1");
                 fitToContent(payload, viewport, pad);
               } else if (action === "reset") {
                 sessionStorage.setItem(storageKey("zoom"), "1");
                 sessionStorage.removeItem(storageKey("scroll_left"));
                 sessionStorage.removeItem(storageKey("scroll_top"));
+                sessionStorage.removeItem(storageKey("auto_fit_done"));
                 render(payload);
               }
             });
@@ -636,12 +650,20 @@
           });
 
           if (viewport) {
-            const defaultLeft = Math.max(0, pad - viewport.clientWidth * 0.25);
-            const defaultTop = Math.max(0, pad - viewport.clientHeight * 0.25);
+            const autoFitDone = sessionStorage.getItem(storageKey("auto_fit_done")) === "1";
+            if (!autoFitDone) {
+              const fitState = computeFitState(payload, viewport, pad);
+              sessionStorage.setItem(storageKey("zoom"), String(Number(fitState.zoom.toFixed(2))));
+              sessionStorage.setItem(storageKey("scroll_left"), String(fitState.left));
+              sessionStorage.setItem(storageKey("scroll_top"), String(fitState.top));
+              sessionStorage.setItem(storageKey("auto_fit_done"), "1");
+              render(payload);
+              return;
+            }
             const maxScrollLeft = Math.max(0, viewport.scrollWidth - viewport.clientWidth);
             const maxScrollTop = Math.max(0, viewport.scrollHeight - viewport.clientHeight);
-            viewport.scrollLeft = Math.min(maxScrollLeft, Math.max(0, readNumberStorage(storageKey("scroll_left"), defaultLeft)));
-            viewport.scrollTop = Math.min(maxScrollTop, Math.max(0, readNumberStorage(storageKey("scroll_top"), defaultTop)));
+            viewport.scrollLeft = Math.min(maxScrollLeft, Math.max(0, readNumberStorage(storageKey("scroll_left"), 0)));
+            viewport.scrollTop = Math.min(maxScrollTop, Math.max(0, readNumberStorage(storageKey("scroll_top"), 0)));
             viewport.addEventListener("scroll", () => {
               persistViewport(viewport);
             });
@@ -711,6 +733,10 @@
       window.addEventListener("message", event => {
         const message = event.data;
         if (!message || message.type !== "streamlit:render") return;
+        sessionStorage.removeItem(storageKey("auto_fit_done"));
+        sessionStorage.removeItem(storageKey("scroll_left"));
+        sessionStorage.removeItem(storageKey("scroll_top"));
+        sessionStorage.removeItem(storageKey("zoom"));
         render(message.args.payload || {});
       });
 
