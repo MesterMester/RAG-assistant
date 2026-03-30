@@ -186,10 +186,11 @@ def persist_layout_and_records(
     records_path,
     index_path,
     chroma_dir,
+    history_path,
     success_message: str,
 ) -> None:
     save_planning_layout(layout_path, layout)
-    persist_records_bulk(records, source_dir, config, records_path, index_path, chroma_dir, success_message)
+    persist_records_bulk(records, source_dir, config, records_path, index_path, chroma_dir, history_path, success_message)
 
 
 def day_display_title(day_date: date, today: date) -> str:
@@ -2048,6 +2049,7 @@ def app() -> None:
                                             records_path,
                                             index_path,
                                             chroma_dir,
+                                            history_events_path,
                                             "Context Graph hierarchia frissitve.",
                                         )
 
