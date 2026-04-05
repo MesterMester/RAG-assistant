@@ -212,6 +212,7 @@ def add_week(layout: dict, start_date_value: str | None = None, title: str | Non
         {
             "key": key,
             "title": title.strip() if title else _week_title(start),
+            "custom_title": bool(title and title.strip()),
             "start_date": start.isoformat(),
             "days": [],
         }
@@ -285,6 +286,15 @@ def rename_day(layout: dict, day_key: str, title: str) -> dict:
     if day:
         day["title"] = title.strip()
         day["custom_title"] = True
+    return layout
+
+
+def rename_week(layout: dict, week_key: str, title: str) -> dict:
+    for week in layout.get("weeks", []):
+        if week.get("key") == week_key:
+            week["title"] = title.strip()
+            week["custom_title"] = True
+            break
     return layout
 
 

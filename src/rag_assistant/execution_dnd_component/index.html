@@ -394,6 +394,18 @@
         if (boardPane) boardPane.scrollTop = Number(sessionStorage.getItem("execution_board_scroll") || 0);
       }
 
+      function readTreeOpenState() {
+        try {
+          return JSON.parse(sessionStorage.getItem("execution_tree_open_state") || "{}");
+        } catch (_error) {
+          return {};
+        }
+      }
+
+      function writeTreeOpenState(state) {
+        sessionStorage.setItem("execution_tree_open_state", JSON.stringify(state));
+      }
+
       function attachScrollPersistence() {
         const treePane = document.querySelector(".tree-pane");
         const boardPane = document.querySelector(".board-pane");
@@ -434,6 +446,12 @@
               event.preventDefault();
               const details = summaryEl.parentElement;
               details.open = !details.open;
+              const treeId = details.dataset.treeId || "";
+              if (treeId) {
+                const nextState = readTreeOpenState();
+                nextState[treeId] = details.open;
+                writeTreeOpenState(nextState);
+              }
               return;
             }
             if (link) {
@@ -482,6 +500,18 @@
             }
           });
         });
+
+        app.querySelectorAll("[data-rename-week]").forEach(button => {
+          button.addEventListener("click", event => {
+            event.preventDefault();
+            const weekKey = button.dataset.renameWeek || "";
+            const currentTitle = button.dataset.currentTitle || "";
+            const title = window.prompt("Hét új neve:", currentTitle);
+            if (weekKey && title && title.trim()) {
+              sendAction({ action: "rename_week", week_key: weekKey, title: title.trim() });
+            }
+          });
+        });
       }
 
       function renderBoard(payload) {
@@ -489,6 +519,7 @@
         const app = document.getElementById("app");
         const sections = payload.sections || [];
         const tasks = payload.tasks || [];
+        const treeOpenState = readTreeOpenState();
         const taskByBucket = new Map();
         tasks.forEach(task => {
           const bucket = task.planning_bucket || "__unscheduled__";
@@ -502,6 +533,10 @@
             <div>Blokkba dobas utan a task due mezot a nap datumahoz igazítjuk.</div>
           </div>
         `;
+
+        function openAttr(treeId) {
+          return treeOpenState[treeId] === false ? "" : "open";
+        }
 
         function renderTreeBlocks(day) {
           return (day.blocks || []).map(bucket => `
@@ -521,7 +556,7 @@
             `;
           }
           return `
-            <details class="tree tree-day" open>
+            <details class="tree tree-day" data-tree-id="tree-day-${escapeHtml(day.key || day.title)}" ${openAttr(`tree-day-${day.key || day.title}`)}>
               <summary>
                 <button class="toggle" type="button" aria-label="Nyitas-zaras"></button>
                 <span class="tree-link" data-anchor-target="anchor-${escapeHtml(day.key || day.title)}">
@@ -555,7 +590,7 @@
                 <div class="task" draggable="true" data-record-id="${escapeHtml(task.record_id)}" style="--bucket-accent:${style.accent};">
                   <div class="task-title">${escapeHtml(task.title)}</div>
                   <div class="task-meta">${escapeHtml(task.project || "-")} / ${escapeHtml(task.case_name || "-")}</div>
-                  ${bucket.show_due_meta && task.due_at ? `<div class="task-date">${escapeHtml(task.due_at)}</div>` : ``}
+                  ${task.due_at ? `<div class="task-date">${escapeHtml(task.due_at)}</div>` : ``}
                 </div>
               `).join("")
               : `<div class="empty">Ures blokk</div>`;
@@ -581,7 +616,7 @@
             `;
           }
           return `
-            <details class="tree day" open>
+            <details class="tree day" data-tree-id="board-day-${escapeHtml(day.key || day.title)}" ${openAttr(`board-day-${day.key || day.title}`)}>
               <summary class="day-header" id="anchor-${escapeHtml(day.key || day.title)}">
                 <button class="toggle" type="button" aria-label="Nyitas-zaras"></button>
                 <span>
@@ -609,20 +644,21 @@
               return dayTreeHtml;
             }
             return `
-              <details class="tree group" open>
+              <details class="tree group" data-tree-id="tree-group-${escapeHtml(group.key || group.title)}" ${openAttr(`tree-group-${group.key || group.title}`)}>
                 <summary>
                   <button class="toggle" type="button" aria-label="Nyitas-zaras"></button>
                   <span class="tree-link" data-anchor-target="anchor-group-${escapeHtml(group.key || group.title)}">
                     <div class="group-title">${escapeHtml(group.title || "")}</div>
                     <div class="group-meta">${escapeHtml(group.meta || "")}</div>
                   </span>
+                  ${group.week_key ? `<button class="mini-btn" data-rename-week="${escapeHtml(group.week_key)}" data-current-title="${escapeHtml(group.title || "")}">✎</button>` : ``}
                 </summary>
                 <div class="tree-section">${dayTreeHtml}</div>
               </details>
             `;
           }).join("");
           return `
-            <details class="tree" open>
+            <details class="tree" data-tree-id="tree-section-${escapeHtml(section.key || section.title)}" ${openAttr(`tree-section-${section.key || section.title}`)}>
               <summary>
                 <button class="toggle" type="button" aria-label="Nyitas-zaras"></button>
                 <span class="tree-link" data-anchor-target="anchor-section-${escapeHtml(section.key || section.title)}">
@@ -648,13 +684,14 @@
               return daysHtml;
             }
             return `
-              <details class="tree group" open id="anchor-group-${escapeHtml(group.key || group.title)}">
+              <details class="tree group" data-tree-id="board-group-${escapeHtml(group.key || group.title)}" ${openAttr(`board-group-${group.key || group.title}`)} id="anchor-group-${escapeHtml(group.key || group.title)}">
                 <summary>
                   <button class="toggle" type="button" aria-label="Nyitas-zaras"></button>
                   <span>
                     <div class="group-title">${escapeHtml(group.title || "")}</div>
                     <div class="group-meta">${escapeHtml(group.meta || "")}</div>
                   </span>
+                  ${group.week_key ? `<button class="mini-btn" data-rename-week="${escapeHtml(group.week_key)}" data-current-title="${escapeHtml(group.title || "")}">✎</button>` : ``}
                 </summary>
                 <div class="section-body">
                   <div class="days">${daysHtml}</div>
@@ -663,7 +700,7 @@
             `;
           }).join("");
           return `
-            <details class="tree section" open id="anchor-section-${escapeHtml(section.key || section.title)}">
+            <details class="tree section" data-tree-id="board-section-${escapeHtml(section.key || section.title)}" ${openAttr(`board-section-${section.key || section.title}`)} id="anchor-section-${escapeHtml(section.key || section.title)}">
               <summary>
                 <button class="toggle" type="button" aria-label="Nyitas-zaras"></button>
                 <span>

@@ -461,18 +461,19 @@
       function computeRadialLayout(payload) {
         const nodes = payload.nodes || [];
         const { outgoing, incoming } = hierarchyMaps(payload);
-
         let centerId = payload.selected_node_id || (nodes[0] && nodes[0].id) || "";
         while (centerId && (incoming.get(centerId) || []).length) {
           centerId = incoming.get(centerId)[0];
         }
+
         const positions = new Map();
         const nodeWidth = 180;
         const nodeHeight = 92;
-        const centerX = 700;
+        const colGap = 120;
+        const rowGap = 44;
+        const centerX = 760;
         const centerY = 520;
-        const ringGap = 210;
-        let maxRadius = 0;
+        const minSubtreeHeight = nodeHeight + rowGap;
 
         function sortedChildren(nodeId) {
           return (outgoing.get(nodeId) || [])
@@ -480,54 +481,86 @@
             .sort((leftId, rightId) => {
               const left = nodes.find(node => node.id === leftId);
               const right = nodes.find(node => node.id === rightId);
-              return String(left?.label || "").localeCompare(String(right?.label || ""));
+              const leftKey = `${left?.project || ""}/${left?.case_name || ""}/${left?.label || ""}`;
+              const rightKey = `${right?.project || ""}/${right?.case_name || ""}/${right?.label || ""}`;
+              return leftKey.localeCompare(rightKey);
             });
         }
 
-        function subtreeSize(nodeId) {
+        function subtreeHeight(nodeId) {
           const children = sortedChildren(nodeId);
-          if (!children.length) return 1;
-          return Math.max(1, children.reduce((sum, childId) => sum + subtreeSize(childId), 0));
+          if (!children.length) return minSubtreeHeight;
+          const total = children.reduce((sum, childId) => sum + subtreeHeight(childId), 0);
+          return Math.max(minSubtreeHeight, total);
         }
 
-        function placeNode(nodeId, depth, startAngle, endAngle) {
-          const radius = depth * ringGap;
-          const angle = depth === 0 ? -Math.PI / 2 : (startAngle + endAngle) / 2;
-          const x = centerX + Math.cos(angle) * radius - nodeWidth / 2;
-          const y = centerY + Math.sin(angle) * radius - nodeHeight / 2;
+        function placeDirectional(nodeId, depth, centerYPos, direction) {
+          const x = centerX + direction * depth * (nodeWidth + colGap) - nodeWidth / 2;
+          const y = centerYPos - nodeHeight / 2;
           positions.set(nodeId, { x, y, w: nodeWidth, h: nodeHeight });
-          maxRadius = Math.max(maxRadius, radius);
-
           const children = sortedChildren(nodeId);
           if (!children.length) return;
-          const total = children.reduce((sum, childId) => sum + subtreeSize(childId), 0);
-          let cursor = startAngle;
-          children.forEach(childId => {
-            const span = ((endAngle - startAngle) * subtreeSize(childId)) / Math.max(total, 1);
-            placeNode(childId, depth + 1, cursor, cursor + span);
-            cursor += span;
+          const heights = children.map(childId => subtreeHeight(childId));
+          const totalHeight = heights.reduce((sum, value) => sum + value, 0);
+          let cursor = centerYPos - totalHeight / 2;
+          children.forEach((childId, index) => {
+            const childCenter = cursor + heights[index] / 2;
+            placeDirectional(childId, depth + 1, childCenter, direction);
+            cursor += heights[index];
           });
         }
 
         if (centerId) {
-          placeNode(centerId, 0, -Math.PI, Math.PI);
+          positions.set(centerId, { x: centerX - nodeWidth / 2, y: centerY - nodeHeight / 2, w: nodeWidth, h: nodeHeight });
+          const firstLevel = sortedChildren(centerId);
+          const splitAt = Math.ceil(firstLevel.length / 2);
+          const rightChildren = firstLevel.slice(0, splitAt);
+          const leftChildren = firstLevel.slice(splitAt);
+          const sideTotalHeight = sideChildren => sideChildren.reduce((sum, childId) => sum + subtreeHeight(childId), 0);
+
+          let rightCursor = centerY - sideTotalHeight(rightChildren) / 2;
+          rightChildren.forEach(childId => {
+            const height = subtreeHeight(childId);
+            placeDirectional(childId, 1, rightCursor + height / 2, 1);
+            rightCursor += height;
+          });
+
+          let leftCursor = centerY - sideTotalHeight(leftChildren) / 2;
+          leftChildren.forEach(childId => {
+            const height = subtreeHeight(childId);
+            placeDirectional(childId, 1, leftCursor + height / 2, -1);
+            leftCursor += height;
+          });
         }
 
         const placed = new Set(positions.keys());
-        const leftovers = nodes.filter(node => !placed.has(node.id)).sort((a, b) => String(a.label || "").localeCompare(String(b.label || "")));
-        leftovers.forEach((node, index) => {
-          const radius = ringGap * 3.25;
-          const angle = Math.PI * 0.65 + index * 0.42;
-          const x = centerX + Math.cos(angle) * radius - nodeWidth / 2;
-          const y = centerY + Math.sin(angle) * radius - nodeHeight / 2;
-          positions.set(node.id, { x, y, w: nodeWidth, h: nodeHeight });
-          maxRadius = Math.max(maxRadius, radius);
+        let extraY = centerY + 220;
+        nodes.filter(node => !placed.has(node.id)).forEach(node => {
+          positions.set(node.id, { x: centerX + 320, y: extraY, w: nodeWidth, h: nodeHeight });
+          extraY += nodeHeight + rowGap;
         });
+
+        let minX = Infinity;
+        let maxX = 0;
+        let maxY = 0;
+        positions.forEach(pos => {
+          minX = Math.min(minX, pos.x);
+          maxX = Math.max(maxX, pos.x + pos.w);
+          maxY = Math.max(maxY, pos.y + pos.h);
+        });
+
+        if (minX < 40) {
+          const shiftX = 40 - minX;
+          positions.forEach((pos, nodeId) => {
+            positions.set(nodeId, { ...pos, x: pos.x + shiftX });
+          });
+          maxX += shiftX;
+        }
 
         return {
           positions,
-          width: Math.max(1500, centerX * 2 + maxRadius),
-          height: Math.max(1200, centerY * 2 + maxRadius),
+          width: Math.max(1600, maxX + 120),
+          height: Math.max(1100, maxY + 120),
         };
       }
 
@@ -537,12 +570,15 @@
       }
 
       function edgePath(source, target) {
-        const startX = source.x + source.w;
+        const leftToRight = source.x <= target.x;
+        const startX = leftToRight ? source.x + source.w : source.x;
         const startY = source.y + source.h / 2;
-        const endX = target.x;
+        const endX = leftToRight ? target.x : target.x + target.w;
         const endY = target.y + target.h / 2;
-        const dx = Math.max(40, (endX - startX) * 0.45);
-        return `M ${startX} ${startY} C ${startX + dx} ${startY}, ${endX - dx} ${endY}, ${endX} ${endY}`;
+        const dx = Math.max(40, Math.abs(endX - startX) * 0.45);
+        const control1X = leftToRight ? startX + dx : startX - dx;
+        const control2X = leftToRight ? endX - dx : endX + dx;
+        return `M ${startX} ${startY} C ${control1X} ${startY}, ${control2X} ${endY}, ${endX} ${endY}`;
       }
 
       function fitToContent(payload, viewport, pad) {
@@ -652,6 +688,7 @@
               <span>Kattints egy rekord-node-ra a jobb oldali szerkeszteshez. Zoom: Ctrl + egergorgeto. Fuggoleges gorgetes: sima gorgeto. Vizszintes gorgetes: Shift + gorgeto. Mozgatas: huzd az ures hatteret.</span>
               <div class="note-actions">
                 <button class="mini-btn" data-action="fit">Center / Fit</button>
+                <button class="mini-btn" data-action="focus">Focus</button>
                 <button class="mini-btn" data-action="reset">Reset</button>
               </div>
             </div>
@@ -677,6 +714,15 @@
               if (action === "fit" && viewport) {
                 localStorage.setItem(storageKey("auto_fit_done"), "1");
                 fitToContent(payload, viewport, pad);
+              } else if (action === "focus" && viewport) {
+                const currentZoom = Math.max(0.12, Math.min(3.2, readNumberStorage(storageKey("zoom"), 1)));
+                const nextZoom = Math.max(currentZoom, 1.35);
+                const targetCenter = centerSelectedNode(payload, viewport, layout, pad, nextZoom);
+                localStorage.setItem(storageKey("zoom"), String(Number(nextZoom.toFixed(2))));
+                localStorage.setItem(storageKey("scroll_left"), String(targetCenter.left));
+                localStorage.setItem(storageKey("scroll_top"), String(targetCenter.top));
+                localStorage.setItem(storageKey("auto_fit_done"), "1");
+                render(payload);
               } else if (action === "reset") {
                 localStorage.setItem(storageKey("zoom"), "1");
                 localStorage.removeItem(storageKey("scroll_left"));
@@ -744,8 +790,9 @@
             const lastForceFit = localStorage.getItem(storageKey("force_fit_token")) || "";
             if (incomingForceFit && incomingForceFit !== lastForceFit) {
               const fitState = computeFitState(payload, viewport, pad);
-              const selectedCenter = centerSelectedNode(payload, viewport, layout, pad, fitState.zoom);
-              localStorage.setItem(storageKey("zoom"), String(Number(fitState.zoom.toFixed(2))));
+              const focusZoom = Math.max(fitState.zoom, 1.35);
+              const selectedCenter = centerSelectedNode(payload, viewport, layout, pad, focusZoom);
+              localStorage.setItem(storageKey("zoom"), String(Number(focusZoom.toFixed(2))));
               localStorage.setItem(storageKey("scroll_left"), String(selectedCenter.left));
               localStorage.setItem(storageKey("scroll_top"), String(selectedCenter.top));
               localStorage.setItem(storageKey("auto_fit_done"), "1");

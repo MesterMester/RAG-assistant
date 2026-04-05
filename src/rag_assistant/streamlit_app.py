@@ -2,6 +2,8 @@ from __future__ import annotations
 
 from dataclasses import replace
 from datetime import date, timedelta
+from html import escape
+import re
 import subprocess
 
 import pandas as pd
@@ -27,6 +29,7 @@ from rag_assistant.planning_layout import (
     iter_buckets,
     layout_rows,
     must_bucket_for_day,
+    rename_week,
     rename_day,
     remove_block,
     remove_day,
@@ -40,6 +43,7 @@ from rag_assistant.vector_store import VectorStoreError, upsert_manual_records
 STATUS_OPTIONS = ["inbox", "next", "active", "waiting", "done", "cancelled", "archived"]
 RELATION_TYPE_OPTIONS = ["related_to", "depends_on", "blocks", "supports", "decision_for", "references"]
 ENTITY_OPTIONS = [
+    "area",
     "organization",
     "team",
     "project",
@@ -290,8 +294,8 @@ def build_execution_sections(layout: dict) -> list[dict]:
         serialized_day.pop("date_obj", None)
         return serialized_day
 
-    def make_group(key: str, title: str, days: list[dict], meta: str = "") -> dict:
-        return {"key": key, "title": title, "meta": meta, "days": [serialize_day(day) for day in days]}
+    def make_group(key: str, title: str, days: list[dict], meta: str = "", week_key: str = "") -> dict:
+        return {"key": key, "title": title, "meta": meta, "days": [serialize_day(day) for day in days], "week_key": week_key}
 
     def make_archive_group(key: str, title: str, days: list[dict], meta: str = "") -> dict:
         alias_keys: list[str] = []
@@ -318,15 +322,52 @@ def build_execution_sections(layout: dict) -> list[dict]:
         }
         return {"key": key, "title": title, "meta": meta, "days": [archive_day]}
 
-    def make_week_group(week_start: date, days: list[dict]) -> dict:
+    def make_week_group(week_start: date, days: list[dict], title: str = "", week_key: str = "") -> dict:
         week_no = week_start.isocalendar().week
         week_end = week_start + timedelta(days=6)
         return make_group(
             f"week-{week_start.isoformat()}",
-            f"{week_no}. hét",
+            title or f"{week_no}. hét",
             days,
             f"{week_start.strftime('%m.%d')} - {week_end.strftime('%m.%d')}",
+            week_key=week_key,
         )
+
+    def make_simple_week(day_items: list[dict], week_key: str, week_title: str, week_start: date) -> dict | None:
+        must_aliases: list[str] = []
+        prefer_aliases: list[str] = []
+        for day in day_items:
+            for block in day.get("blocks", []):
+                lane = block.get("lane", "session")
+                block_key = block.get("key", "")
+                if lane == "must" and block_key:
+                    must_aliases.append(block_key)
+                elif lane == "prefer" and block_key:
+                    prefer_aliases.append(block_key)
+        if not must_aliases and not prefer_aliases:
+            return None
+        pseudo_day = {
+            "key": f"{week_key}-summary",
+            "title": week_title,
+            "date": week_start.isoformat(),
+            "blocks": [
+                {
+                    "key": f"{week_key}-must-summary",
+                    "title": "Mindenképp",
+                    "lane": "must",
+                    "alias_keys": must_aliases,
+                    "drop_target_key": must_aliases[0] if must_aliases else "",
+                },
+                {
+                    "key": f"{week_key}-prefer-summary",
+                    "title": "Lehetőleg",
+                    "lane": "prefer",
+                    "alias_keys": prefer_aliases,
+                    "drop_target_key": prefer_aliases[0] if prefer_aliases else "",
+                },
+            ],
+        }
+        return make_week_group(week_start, [pseudo_day], title=week_title, week_key=week_key)
 
     def merge_weekend(days: list[dict]) -> list[dict]:
         merged: list[dict] = []
@@ -412,12 +453,18 @@ def build_execution_sections(layout: dict) -> list[dict]:
     future_this_week = [day for day in all_days if today + timedelta(days=2) <= day["date_obj"] <= current_week_end]
     future_next_week = [day for day in all_days if next_week_start <= day["date_obj"] <= next_week_end and day["date_obj"] > today + timedelta(days=1)]
     future_later_weeks: list[dict] = []
-    for offset in range(2, 10):
-        week_start = current_week_start + timedelta(days=7 * offset)
-        week_end = week_start + timedelta(days=6)
-        week_days = [day for day in all_days if week_start <= day["date_obj"] <= week_end]
-        if week_days:
-            future_later_weeks.append(make_week_group(week_start, merge_weekend(week_days)))
+    for week in layout.get("weeks", []):
+        week_start_raw = week.get("start_date")
+        if not week_start_raw:
+            continue
+        week_start = date.fromisoformat(week_start_raw)
+        if week_start <= next_week_start:
+            continue
+        week_days = [day for day in all_days if day.get("week_start_date") == week_start_raw]
+        week_title = f"{week_start.isocalendar().week}. hét"
+        simple_week = make_simple_week(week_days, week.get("key", f"week-{week_start_raw}"), week_title, week_start)
+        if simple_week:
+            future_later_weeks.append(simple_week)
 
     sections: list[dict] = [
         {"key": "main_focus", "title": "Fő fókusz most", "groups": [make_group("main_focus", "Fő fókusz most", main_focus_group_days)]},
@@ -445,6 +492,357 @@ def build_execution_sections(layout: dict) -> list[dict]:
         {"key": "unscheduled", "title": "Ütemezés nélkül", "groups": [make_group("unscheduled", "Ütemezés nélkül", [])]},
     ]
     return sections
+
+
+def filter_execution_sections_by_content(sections: list[dict], tasks: list[KnowledgeRecord], show_only_with_content: bool) -> list[dict]:
+    if not show_only_with_content:
+        return sections
+
+    task_counts: dict[str, int] = {}
+    for record in tasks:
+        bucket_key = record.planning_bucket or "__unscheduled__"
+        task_counts[bucket_key] = task_counts.get(bucket_key, 0) + 1
+
+    filtered_sections: list[dict] = []
+    for section in sections:
+        if section.get("key") == "unscheduled":
+            unscheduled_count = task_counts.get("__unscheduled__", 0) + task_counts.get("", 0)
+            if unscheduled_count > 0:
+                filtered_sections.append(section)
+            continue
+        next_section = dict(section)
+        next_groups: list[dict] = []
+        for group in section.get("groups", []):
+            next_group = dict(group)
+            next_days: list[dict] = []
+            for day in group.get("days", []):
+                next_day = dict(day)
+                kept_blocks: list[dict] = []
+                for block in day.get("blocks", []):
+                    source_keys = [key for key in (block.get("alias_keys") or [block.get("key", "")]) if key]
+                    if any(task_counts.get(key, 0) > 0 for key in source_keys):
+                        kept_blocks.append(dict(block))
+                if kept_blocks:
+                    next_day["blocks"] = kept_blocks
+                    next_days.append(next_day)
+            if next_days:
+                next_group["days"] = next_days
+                next_groups.append(next_group)
+        if next_groups:
+            next_section["groups"] = next_groups
+            filtered_sections.append(next_section)
+    return filtered_sections
+
+
+def monday_of(day_value: date) -> date:
+    return day_value - timedelta(days=day_value.weekday())
+
+
+def month_start(day_value: date) -> date:
+    return date(day_value.year, day_value.month, 1)
+
+
+def month_add(month_value: date) -> date:
+    year = month_value.year + (1 if month_value.month == 12 else 0)
+    month = 1 if month_value.month == 12 else month_value.month + 1
+    return date(year, month, 1)
+
+
+def gantt_units(records: list[KnowledgeRecord], scale: str) -> list[date]:
+    dates: list[date] = []
+    for record in records:
+        for value in [record.start_at, record.due_at, record.deadline]:
+            if value:
+                dates.append(date.fromisoformat(value))
+    today = date.today()
+    start = min(dates) if dates else today
+    end = max(dates) if dates else today
+    start = min(start, today - timedelta(days=14))
+    end = max(end, today + timedelta(days=183))
+    if scale == "day":
+        current = start
+        values: list[date] = []
+        while current <= end:
+            values.append(current)
+            current += timedelta(days=1)
+        return values
+    if scale == "week":
+        current = monday_of(start)
+        end_week = monday_of(end)
+        values = []
+        while current <= end_week:
+            values.append(current)
+            current += timedelta(days=7)
+        return values
+    current = month_start(start)
+    end_month = month_start(end)
+    values = []
+    while current <= end_month:
+        values.append(current)
+        current = month_add(current)
+    return values
+
+
+def gantt_index_for(day_value: date | None, units: list[date], scale: str) -> int | None:
+    if day_value is None or not units:
+        return None
+    if scale == "day":
+        try:
+            return units.index(day_value)
+        except ValueError:
+            return None
+    if scale == "week":
+        target = monday_of(day_value)
+    else:
+        target = month_start(day_value)
+    try:
+        return units.index(target)
+    except ValueError:
+        return None
+
+
+def gantt_headers(units: list[date], scale: str) -> list[str]:
+    if scale == "day":
+        return [value.strftime("%m.%d") for value in units]
+    if scale == "week":
+        return [f"{value.isocalendar().week}. hét" for value in units]
+    return [value.strftime("%Y.%m") for value in units]
+
+
+def matches_presence_filter(value: str | None, mode: str) -> bool:
+    has_value = bool((value or "").strip())
+    if mode == "has":
+        return has_value
+    if mode == "missing":
+        return not has_value
+    return True
+
+
+def render_gantt_view(records: list[KnowledgeRecord]) -> None:
+    st.subheader("GANTT")
+    gantt_records = [record for record in records if record.entity_type in {"area", "organization", "team", "project", "case", "task"}]
+    if not gantt_records:
+        st.info("Meg nincs area / organization / team / project / case / task rekord a GANTT nezethez.")
+        return
+
+    with st.expander("GANTT szűrők", expanded=True):
+        filter_col1, filter_col2, filter_col3, filter_col4 = st.columns(4)
+        presence_options = ["all", "has", "missing"]
+        presence_labels = {"all": "Mindegy", "has": "Van", "missing": "Nincs"}
+        gantt_filter_start = filter_col1.selectbox(
+            "Start mező",
+            options=presence_options,
+            format_func=lambda value: presence_labels[value],
+            key="gantt_filter_start",
+        )
+        gantt_filter_due = filter_col2.selectbox(
+            "Due mező",
+            options=presence_options,
+            format_func=lambda value: presence_labels[value],
+            key="gantt_filter_due",
+        )
+        gantt_filter_deadline = filter_col3.selectbox(
+            "Deadline mező",
+            options=presence_options,
+            format_func=lambda value: presence_labels[value],
+            key="gantt_filter_deadline",
+        )
+        gantt_filter_relations = filter_col4.selectbox(
+            "Kapcsolatok",
+            options=presence_options,
+            format_func=lambda value: presence_labels[value],
+            key="gantt_filter_relations",
+        )
+        text_col1, text_col2 = st.columns(2)
+        gantt_filter_text = text_col1.text_input("Szöveges szűrés", key="gantt_filter_text")
+        gantt_filter_entity = text_col2.multiselect(
+            "Típus",
+            options=["area", "organization", "team", "project", "case", "task"],
+            default=st.session_state.get("gantt_filter_entity", ["area", "organization", "team", "project", "case", "task"]),
+            key="gantt_filter_entity",
+        )
+
+    scale = st.selectbox(
+        "Időegység",
+        options=["day", "week", "month"],
+        format_func=lambda value: {"day": "Napok", "week": "Hetek", "month": "Hónapok"}.get(value, value),
+        key="gantt_scale",
+    )
+
+    def relation_summary(record: KnowledgeRecord) -> str:
+        edges = normalize_graph_edges(record.graph_edges, record.relations, record.record_id)
+        return ", ".join(sorted({edge.get("relation_type", "related_to") for edge in edges})) or "-"
+
+    lookup_all = {record.record_id: record for record in gantt_records}
+    matched_records = [
+        record
+        for record in gantt_records
+        if (not gantt_filter_entity or record.entity_type in gantt_filter_entity)
+        if matches_presence_filter(record.start_at, gantt_filter_start)
+        and matches_presence_filter(record.due_at, gantt_filter_due)
+        and matches_presence_filter(record.deadline, gantt_filter_deadline)
+        and matches_presence_filter("" if relation_summary(record) == "-" else relation_summary(record), gantt_filter_relations)
+        and (
+            not gantt_filter_text.strip()
+            or gantt_filter_text.strip().lower() in record.title.lower()
+            or gantt_filter_text.strip().lower() in record.summary.lower()
+            or gantt_filter_text.strip().lower() in record.organization.lower()
+            or gantt_filter_text.strip().lower() in record.team.lower()
+            or gantt_filter_text.strip().lower() in record.project.lower()
+            or gantt_filter_text.strip().lower() in record.case_name.lower()
+        )
+    ]
+    if any(mode != "all" for mode in [gantt_filter_start, gantt_filter_due, gantt_filter_deadline, gantt_filter_relations]):
+        included_ids = {record.record_id for record in matched_records}
+        for record in list(matched_records):
+            parent_id = record.parent_id
+            while parent_id and parent_id in lookup_all and parent_id not in included_ids:
+                included_ids.add(parent_id)
+                parent_id = lookup_all[parent_id].parent_id
+        visible_records = [record for record in gantt_records if record.record_id in included_ids]
+    else:
+        visible_records = gantt_records
+
+    if not visible_records:
+        st.info("A jelenlegi GANTT-szűrésre nincs találat.")
+        return
+
+    units = gantt_units(visible_records, scale)
+    headers = gantt_headers(units, scale)
+    column_width = 44 if scale == "day" else 64
+
+    lookup = {record.record_id: record for record in visible_records}
+    children_by_parent: dict[str, list[KnowledgeRecord]] = {}
+    roots: list[KnowledgeRecord] = []
+    entity_order = {"area": 0, "organization": 1, "team": 2, "project": 3, "case": 4, "task": 5}
+
+    for record in visible_records:
+        parent = lookup.get(record.parent_id) if record.parent_id else None
+        if parent:
+            children_by_parent.setdefault(parent.record_id, []).append(record)
+        else:
+            roots.append(record)
+
+    def sort_records(items: list[KnowledgeRecord]) -> list[KnowledgeRecord]:
+        return sorted(items, key=lambda item: (entity_order.get(item.entity_type, 99), item.title.lower()))
+
+    weekend_overlay_html = "".join(
+        f'<div class="gantt-weekend-bg" style="left:{index * column_width}px;width:{column_width}px;"></div>'
+        for index, value in enumerate(units)
+        if scale == "day" and value.weekday() >= 5
+    )
+
+    def marker_html(record: KnowledgeRecord) -> str:
+        start_idx = gantt_index_for(parse_optional_date(record.start_at), units, scale)
+        due_idx = gantt_index_for(parse_optional_date(record.due_at), units, scale)
+        deadline_idx = gantt_index_for(parse_optional_date(record.deadline), units, scale)
+        left_idx = min(value for value in [start_idx, due_idx, deadline_idx] if value is not None) if any(value is not None for value in [start_idx, due_idx, deadline_idx]) else None
+        right_idx = max(value for value in [start_idx, due_idx, deadline_idx] if value is not None) if any(value is not None for value in [start_idx, due_idx, deadline_idx]) else None
+        pieces: list[str] = []
+        if left_idx is not None and right_idx is not None and right_idx > left_idx:
+            pieces.append(
+                f'<div class="gantt-span" style="left:{left_idx * column_width + 8}px;width:{(right_idx - left_idx + 1) * column_width - 16}px;"></div>'
+            )
+        if start_idx is not None:
+            pieces.append(f'<div class="gantt-mark start" style="left:{start_idx * column_width + column_width / 2 - 10}px;">&#9654;</div>')
+        if due_idx is not None:
+            pieces.append(f'<div class="gantt-mark due" style="left:{due_idx * column_width + column_width / 2 - 10}px;">&#128205;</div>')
+        if deadline_idx is not None:
+            pieces.append(f'<div class="gantt-mark deadline" style="left:{deadline_idx * column_width + column_width / 2 - 10}px;">&#9664;</div>')
+        return "".join(pieces)
+
+    def row_html(record: KnowledgeRecord, level: int) -> str:
+        return f"""
+        <div class="gantt-row level-{level}">
+          <div class="gantt-cell gantt-name">{escape(record.title)}</div>
+          <div class="gantt-cell">{escape(record.entity_type)}</div>
+          <div class="gantt-cell">{escape(record.start_at or "-")}</div>
+          <div class="gantt-cell">{escape(record.due_at or "-")}</div>
+          <div class="gantt-cell">{escape(record.deadline or "-")}</div>
+          <div class="gantt-cell">{escape(relation_summary(record))}</div>
+          <div class="gantt-timeline" style="width:{len(units) * column_width}px;">{weekend_overlay_html}{marker_html(record)}</div>
+        </div>
+        """
+
+    body_rows: list[str] = []
+
+    def render_tree(record: KnowledgeRecord, level: int) -> str:
+        children = sort_records(children_by_parent.get(record.record_id, []))
+        if not children:
+            return row_html(record, level)
+        children_html = "".join(render_tree(child, level + 1) for child in children)
+        return f'<details class="gantt-details" open><summary>{row_html(record, level)}</summary><div class="gantt-children">{children_html}</div></details>'
+
+    for root_record in sort_records(roots):
+        body_rows.append(render_tree(root_record, 0))
+
+    scale_header_html = "".join(
+        f'<div class="gantt-scale-cell {"weekend" if scale == "day" and units[index].weekday() >= 5 else ""}">{escape(label)}</div>'
+        for index, label in enumerate(headers)
+    )
+
+    gantt_html = f"""
+    <style>
+    .gantt-shell {{ border:1px solid #e5e7eb; border-radius:16px; background:#fff; overflow:auto; max-height:760px; width:100%; }}
+    .gantt-header, .gantt-row {{ display:grid; grid-template-columns: 260px 90px 110px 110px 110px 160px {len(units) * column_width}px; align-items:center; }}
+    .gantt-header {{ position:sticky; top:0; z-index:2; background:#f8fafc; border-bottom:1px solid #e5e7eb; font-weight:700; }}
+    .gantt-cell {{ padding:8px 10px; border-right:1px solid #eef2f7; font-size:12px; min-height:42px; display:flex; align-items:center; }}
+    .gantt-name {{ font-weight:600; }}
+    .gantt-row {{ border-bottom:1px solid #f1f5f9; }}
+    .gantt-row.level-1 .gantt-name {{ padding-left:22px; }}
+    .gantt-row.level-2 .gantt-name {{ padding-left:40px; }}
+    .gantt-timeline {{ position:relative; height:42px; background-image: linear-gradient(to right, #eef2f7 1px, transparent 1px); background-size:{column_width}px 100%; overflow:hidden; }}
+    .gantt-weekend-bg {{ position:absolute; top:0; bottom:0; background:#f1f5f9; z-index:0; }}
+    .gantt-span {{ position:absolute; top:16px; height:10px; border-radius:999px; background:rgba(59,130,246,0.16); border:1px solid rgba(59,130,246,0.28); z-index:1; }}
+    .gantt-mark {{ position:absolute; top:8px; font-size:16px; line-height:1; z-index:2; }}
+    .gantt-mark.start {{ color:#2563eb; }}
+    .gantt-mark.due {{ color:#0f766e; }}
+    .gantt-mark.deadline {{ color:#b91c1c; }}
+    .gantt-scale {{ display:grid; grid-template-columns: repeat({len(units)}, {column_width}px); }}
+    .gantt-scale-cell {{ padding:8px 0; text-align:center; font-size:11px; border-right:1px solid #eef2f7; }}
+    .gantt-scale-cell.weekend {{ background:#f1f5f9; }}
+    .gantt-details > summary {{ list-style:none; cursor:pointer; }}
+    .gantt-details > summary::-webkit-details-marker {{ display:none; }}
+    .gantt-children {{ }}
+    </style>
+    <div class="gantt-shell">
+      <div class="gantt-header">
+        <div class="gantt-cell">Elem</div>
+        <div class="gantt-cell">Típus</div>
+        <div class="gantt-cell">Start</div>
+        <div class="gantt-cell">Due</div>
+        <div class="gantt-cell">Deadline</div>
+        <div class="gantt-cell">Kapcsolatok</div>
+        <div class="gantt-scale">{scale_header_html}</div>
+      </div>
+      {"".join(body_rows)}
+    </div>
+    """
+    components.html(gantt_html, height=820, scrolling=True)
+
+    gantt_edit_ids = [record.record_id for record in visible_records]
+    gantt_selected_id = st.selectbox(
+        "GANTT szerkesztés",
+        options=gantt_edit_ids,
+        format_func=lambda record_id: record_label(lookup[record_id]),
+        key="gantt_selected_record_id",
+    )
+    gantt_selected = lookup[gantt_selected_id]
+    edit_col1, edit_col2, edit_col3, edit_col4 = st.columns(4)
+    gantt_title = edit_col1.text_input("Név", value=gantt_selected.title, key=f"gantt_title_{gantt_selected.record_id}")
+    edit_col2.caption(f"Típus: {gantt_selected.entity_type}")
+    gantt_start = edit_col2.date_input("Start", value=parse_optional_date(gantt_selected.start_at), key=f"gantt_start_{gantt_selected.record_id}")
+    gantt_due = edit_col3.date_input("Due", value=parse_optional_date(gantt_selected.due_at), key=f"gantt_due_{gantt_selected.record_id}")
+    gantt_deadline = edit_col4.date_input("Deadline", value=parse_optional_date(gantt_selected.deadline), key=f"gantt_deadline_{gantt_selected.record_id}")
+    if st.button("GANTT sor mentése", key=f"gantt_save_{gantt_selected.record_id}"):
+        updated_record = update_record(
+            gantt_selected,
+            title=gantt_title.strip(),
+            start_at=gantt_start.isoformat() if isinstance(gantt_start, date) else None,
+            due_at=gantt_due.isoformat() if isinstance(gantt_due, date) else None,
+            deadline=gantt_deadline.isoformat() if isinstance(gantt_deadline, date) else None,
+        )
+        persist_record(with_synced_hierarchy_title(updated_record), source_dir, config, records_path, index_path, chroma_dir, history_events_path)
 
 
 def get_selected_record(records: list[KnowledgeRecord]) -> KnowledgeRecord | None:
@@ -515,6 +913,95 @@ def format_next_steps(steps: list[dict]) -> str:
             continue
         lines.append(f"{prefix} {title}" + (f" | {estimate}" if estimate else ""))
     return "\n".join(lines)
+
+
+def markdown_import_entity(line: str) -> tuple[str, str, str]:
+    text = line.strip()
+    if text.startswith("[ ]"):
+        return text[3:].strip(), "task", "inbox"
+    if text.startswith("[x]") or text.startswith("[X]"):
+        return text[3:].strip(), "task", "done"
+    return text, "note", "inbox"
+
+
+def parse_markdown_hierarchy(markdown_text: str) -> list[dict]:
+    nodes: list[dict] = []
+    stack: list[dict] = []
+    last_node: dict | None = None
+
+    for raw_line in (markdown_text or "").splitlines():
+        if not raw_line.strip():
+            continue
+
+        heading_match = re.match(r"^(#{1,6})\s+(.*)$", raw_line)
+        list_match = re.match(r"^(\s*)[-*+]\s+(.*)$", raw_line)
+
+        if heading_match:
+            depth = max(len(heading_match.group(1)) - 1, 0)
+            title, entity_type, status = markdown_import_entity(heading_match.group(2))
+        elif list_match:
+            indent = len(list_match.group(1).replace("\t", "  "))
+            depth = indent // 2
+            title, entity_type, status = markdown_import_entity(list_match.group(2))
+        else:
+            if last_node is not None:
+                extra = raw_line.strip()
+                if extra:
+                    last_node["content_lines"].append(extra)
+            continue
+
+        title = title.strip()
+        if not title:
+            continue
+
+        while len(stack) > depth:
+            stack.pop()
+        parent_temp_id = stack[-1]["temp_id"] if stack else ""
+        temp_id = f"import-{len(nodes)}"
+        node = {
+            "temp_id": temp_id,
+            "parent_temp_id": parent_temp_id,
+            "title": title,
+            "entity_type": entity_type,
+            "status": status,
+            "content_lines": [],
+        }
+        nodes.append(node)
+        stack.append(node)
+        last_node = node
+
+    return nodes
+
+
+def build_records_from_markdown_import(parent_record: KnowledgeRecord, markdown_text: str) -> list[KnowledgeRecord]:
+    parsed_nodes = parse_markdown_hierarchy(markdown_text)
+    if not parsed_nodes:
+        return []
+
+    created: list[KnowledgeRecord] = []
+    temp_to_record_id: dict[str, str] = {}
+
+    for item in parsed_nodes:
+        parent_id = temp_to_record_id.get(item["parent_temp_id"], parent_record.record_id)
+        content = "\n\n".join(line for line in item.get("content_lines", []) if line.strip())
+        created_record = KnowledgeRecord(
+            record_id=build_record_id(item["title"]),
+            title=item["title"],
+            summary="",
+            content=content,
+            source_type="manual",
+            entity_type=item["entity_type"],
+            status=item["status"],
+            organization=parent_record.organization,
+            team=parent_record.team,
+            project=parent_record.project,
+            case_name=parent_record.case_name,
+            parent_id=parent_id,
+        )
+        created.append(created_record)
+        temp_to_record_id[item["temp_id"]] = created_record.record_id
+
+    return created
 
 
 def normalize_table_value(value) -> str:
@@ -753,8 +1240,26 @@ def reparent_subtree(records: list[KnowledgeRecord], moved_id: str, new_parent_i
     return sync_hierarchy_renames(merged_records, lookup)
 
 
+def remove_record_and_reparent_children(records: list[KnowledgeRecord], record_id: str) -> list[KnowledgeRecord]:
+    lookup = {record.record_id: record for record in records}
+    removed = lookup.get(record_id)
+    if not removed:
+        return records
+
+    updated_records: list[KnowledgeRecord] = []
+    for record in records:
+        if record.record_id == record_id:
+            continue
+        if record.parent_id == record_id:
+            updated_records.append(update_record(record, parent_id=removed.parent_id, updated_at=utc_now_iso()))
+        else:
+            updated_records.append(record)
+    return sync_hierarchy_renames(updated_records, lookup)
+
+
 def hierarchy_fields_for(entity_type: str) -> list[str]:
     mapping = {
+        "area": [],
         "organization": ["organization"],
         "team": ["organization", "team"],
         "project": ["organization", "team", "project"],
@@ -857,9 +1362,9 @@ def render_record_editor(
         key=f"{key_prefix}_entity_type",
     )
 
-    show_status = entity_type not in {"organization", "team", "person"}
+    show_status = entity_type not in {"area", "organization", "team", "person"}
     show_people = entity_type in {"organization", "team", "project", "case", "task", "event", "note", "source_item", "decision"}
-    show_parent = allow_parent_edit and entity_type not in {"organization"}
+    show_parent = allow_parent_edit
     show_schedule = entity_type in {"task", "case", "project", "decision", "note", "source_item"}
     show_event = entity_type == "event"
     show_decision = entity_type in {"project", "case", "task", "decision", "note", "source_item"}
@@ -931,10 +1436,21 @@ def render_record_editor(
                 hierarchy_values[field_name] = ""
 
     if not allow_parent_edit:
-        parent_id = infer_parent_from_hierarchy(records, entity_type, hierarchy_values, record.record_id)
+        if entity_type in {"area", "organization"}:
+            parent_id = record.parent_id
+        elif entity_type in {"team", "project", "case"}:
+            parent_id = infer_parent_from_hierarchy(records, entity_type, hierarchy_values, record.record_id)
+        else:
+            parent_id = record.parent_id or infer_parent_from_hierarchy(records, entity_type, hierarchy_values, record.record_id)
 
     summary = st.text_area("Rovid osszefoglalo", value=record.summary, height=100, key=f"{key_prefix}_summary")
-    content = st.text_area("Reszletes tartalom", value=record.content, height=220, key=f"{key_prefix}_content")
+    content = st.text_area(
+        "Reszletes tartalom / Markdown jegyzet",
+        value=record.content,
+        height=320,
+        help="A sima beillesztett markdown itt nyers markdownkent mentodik el. Később egy gazdagabb editor is ugyanebből tud dolgozni.",
+        key=f"{key_prefix}_content",
+    )
 
     tag_col, relation_col = st.columns(2)
     tags_raw = tag_col.text_input(
@@ -1311,13 +1827,12 @@ def build_context_graph_payload(records: list[KnowledgeRecord], selected_node_id
             if project_node:
                 add_edge(project_node, case_node, "hierarchy")
 
-        if record.entity_type not in {"organization", "team", "project", "case"}:
-            if record.parent_id and record.parent_id in filtered_lookup:
-                add_edge(record.parent_id, record.record_id, "hierarchy")
-            else:
-                parent_node = case_node or project_node or team_node or org_node
-                if parent_node:
-                    add_edge(parent_node, record.record_id, "hierarchy")
+        if record.parent_id and record.parent_id in filtered_lookup:
+            add_edge(record.parent_id, record.record_id, "hierarchy")
+        elif record.entity_type not in {"area", "organization", "team", "project", "case"}:
+            parent_node = case_node or project_node or team_node or org_node
+            if parent_node:
+                add_edge(parent_node, record.record_id, "hierarchy")
 
         if show_relations and not show_only_hierarchy:
             for edge in normalize_graph_edges(record.graph_edges, record.relations, record.record_id):
@@ -1507,6 +2022,9 @@ def render_execution_graph(records: list[KnowledgeRecord], layout: dict, layout_
     st.subheader("Execution Graph")
     st.caption("Vizuális, drag-and-drop planning felület hét -> nap -> blokk szerkezettel. A blokkhoz tartozó nap dátuma a task `due` mezőjével kerül összhangba, a `deadline` ettől független marad.")
     render_execution_layout_manager(layout, layout_path)
+    pending_bucket = st.session_state.pop("pending_execution_filter_bucket", None)
+    if pending_bucket is not None:
+        st.session_state["execution_filter_bucket"] = pending_bucket
 
     with st.expander("Szűrés", expanded=False):
         filter_col1, filter_col2, filter_col3, filter_col4 = st.columns(4)
@@ -1523,6 +2041,7 @@ def render_execution_graph(records: list[KnowledgeRecord], layout: dict, layout_
         exec_due_from = filter_col5.date_input("Due - tól", value=st.session_state.get("execution_filter_due_from"), key="execution_filter_due_from")
         exec_due_to = filter_col6.date_input("Due - ig", value=st.session_state.get("execution_filter_due_to"), key="execution_filter_due_to")
         exec_text = filter_col7.text_input("Szöveges szűrés", key="execution_filter_text")
+        exec_only_with_content = st.checkbox("Csak ahol van tartalom", value=st.session_state.get("execution_only_with_content", False), key="execution_only_with_content")
 
     task_records = [record for record in records if record.entity_type == "task"]
     filtered_task_records = task_records
@@ -1559,7 +2078,7 @@ def render_execution_graph(records: list[KnowledgeRecord], layout: dict, layout_
         return
 
     component_payload = {
-        "sections": build_execution_sections(layout),
+        "sections": filter_execution_sections_by_content(build_execution_sections(layout), filtered_task_records, exec_only_with_content),
         "tasks": [
             {
                 "record_id": record.record_id,
@@ -1567,6 +2086,7 @@ def render_execution_graph(records: list[KnowledgeRecord], layout: dict, layout_
                 "project": record.project,
                 "case_name": record.case_name,
                 "planning_bucket": record.planning_bucket,
+                "due_at": record.due_at,
                 "focus_rank": record.focus_rank,
             }
             for record in filtered_task_records
@@ -1574,7 +2094,7 @@ def render_execution_graph(records: list[KnowledgeRecord], layout: dict, layout_
     }
 
     drag_result = execution_dnd_board(component_payload, key="execution_dnd_surface")
-    if isinstance(drag_result, dict) and drag_result.get("action") in {"move_task", "add_block", "remove_block", "rename_day"}:
+    if isinstance(drag_result, dict) and drag_result.get("action") in {"move_task", "add_block", "remove_block", "rename_day", "rename_week"}:
         event_id = str(drag_result.get("event_id", "")).strip()
         if event_id and st.session_state.get("last_execution_drag_event") == event_id:
             drag_result = None
@@ -1612,6 +2132,11 @@ def render_execution_graph(records: list[KnowledgeRecord], layout: dict, layout_
         title = str(drag_result.get("title", "")).strip()
         if day_key and title and find_day(layout, day_key):
             persist_planning_layout(rename_day(layout, day_key, title), layout_path)
+    if isinstance(drag_result, dict) and drag_result.get("action") == "rename_week":
+        week_key = str(drag_result.get("week_key", "")).strip()
+        title = str(drag_result.get("title", "")).strip()
+        if week_key and title:
+            persist_planning_layout(rename_week(layout, week_key, title), layout_path)
     if isinstance(drag_result, dict) and drag_result.get("action") == "remove_block":
         block_key = str(drag_result.get("block_key", "")).strip()
         block_info = find_block(layout, block_key) if block_key else None
@@ -1815,7 +2340,7 @@ def app() -> None:
         st.sidebar.caption(selected_record.record_id)
 
     tab_execution, tab_mindmap, tab_kanban, tab_detail, tab_input, tab_table, tab_timeline, tab_search = st.tabs(
-        ["Execution Graph", "Context Graph", "Kanban", "Részlet", "Bevitel", "Táblázat", "Timeline", "Keresés"]
+        ["Execution Graph", "Context Graph", "Kanban", "Részlet", "Bevitel", "Táblázat", "GANTT", "Keresés"]
     )
     inject_tab_bar_behavior()
 
@@ -2196,53 +2721,7 @@ def app() -> None:
                         persist_record(update_record(moved_record, status=new_status), source_dir, config, records_path, index_path, chroma_dir, history_events_path)
 
     with tab_timeline:
-        st.subheader("Timeline nezet")
-        st.caption("Itt helyben modosithatod a due, deadline vagy event datumot.")
-        items = [record for record in records if record.due_at or record.deadline or record.event_at]
-        items.sort(key=lambda item: item.event_at or item.due_at or item.deadline or "9999-99-99")
-        if not items:
-            st.info("Meg nincs datumhoz kotott rekord.")
-        for record in items:
-            when = record.event_at or record.due_at or record.deadline or ""
-            label = "event" if record.event_at else ("due" if record.due_at else "deadline")
-            st.markdown(f"**{when}** [{label}] {record.title}")
-            st.caption(f"{record.entity_type} | {record.organization} / {record.team} / {record.project} / {record.case_name}")
-            if record.summary:
-                st.write(record.summary)
-
-            edit_col1, edit_col2 = st.columns(2)
-            with edit_col1:
-                if record.event_at:
-                    new_date = st.date_input(
-                        "Uj esemeny datum",
-                        value=parse_optional_date(record.event_at),
-                        key=f"timeline_event_{record.record_id}",
-                    )
-                elif record.due_at:
-                    new_date = st.date_input(
-                        "Uj due date",
-                        value=parse_optional_date(record.due_at),
-                        key=f"timeline_due_{record.record_id}",
-                    )
-                else:
-                    new_date = st.date_input(
-                        "Uj deadline",
-                        value=parse_optional_date(record.deadline),
-                        key=f"timeline_deadline_{record.record_id}",
-                    )
-            with edit_col2:
-                if st.button("Datum mentese", key=f"save_timeline_{record.record_id}"):
-                    updated_record = update_record(
-                        record,
-                        due_at=(new_date.isoformat() if isinstance(new_date, date) else None) if record.due_at and not record.event_at else record.due_at,
-                        deadline=(new_date.isoformat() if isinstance(new_date, date) else None) if record.deadline and not record.due_at and not record.event_at else record.deadline,
-                        event_at=(new_date.isoformat() if isinstance(new_date, date) else None) if record.event_at else None,
-                    )
-                    persist_record(updated_record, source_dir, config, records_path, index_path, chroma_dir, history_events_path)
-                if st.button("Megnyit", key=f"open_timeline_{record.record_id}"):
-                    st.session_state["selected_record_id"] = record.record_id
-                    st.rerun()
-            st.divider()
+        render_gantt_view(records)
 
     with tab_execution:
         render_execution_graph(records, planning_layout, planning_layout_path, source_dir, config, records_path, index_path, chroma_dir, history_events_path)
@@ -2389,7 +2868,7 @@ def app() -> None:
                                 allow_parent_edit=False,
                             )
                             with action_placeholder.container():
-                                action_col1, action_col2, action_col3, action_col4, action_col5 = st.columns(5)
+                                action_col1, action_col2, action_col3, action_col4, action_col5, action_col6 = st.columns(6)
                                 if action_col1.button("Mentés", key="save_context_graph_record"):
                                     updated_record = update_record(
                                         selected_record,
@@ -2459,6 +2938,48 @@ def app() -> None:
                                     st.rerun()
                                 if action_col5.button("History", key="open_history_context_graph"):
                                     st.session_state[f"context_history_{selected_record.record_id}"] = not st.session_state.get(f"context_history_{selected_record.record_id}", False)
+                                if action_col6.button("Törlés", key="delete_context_graph_record"):
+                                    updated_records = remove_record_and_reparent_children(records, selected_record.record_id)
+                                    if updated_records == records:
+                                        st.warning("A rekord nem található vagy nem törölhető.")
+                                    else:
+                                        remaining = [record for record in updated_records if record.record_id != selected_record.record_id]
+                                        if remaining:
+                                            st.session_state["context_graph_selected_record_id"] = remaining[0].record_id
+                                        persist_records_bulk(
+                                            updated_records,
+                                            source_dir,
+                                            config,
+                                            records_path,
+                                            index_path,
+                                            chroma_dir,
+                                            history_events_path,
+                                            "Context Graph rekord törölve.",
+                                        )
+                            with st.expander("Markdown hierarchy import", expanded=False):
+                                markdown_import_raw = st.text_area(
+                                    "Markdown fa beillesztése a kijelölt node alá",
+                                    value="",
+                                    height=180,
+                                    help="A listaelemek külön node-okká alakulnak. A '- [ ]' és '- [x]' sorokból task node készül.",
+                                    key=f"context_markdown_import_{selected_record.record_id}",
+                                )
+                                if st.button("Import hierarchy", key=f"context_markdown_import_button_{selected_record.record_id}"):
+                                    imported_records = build_records_from_markdown_import(selected_record, markdown_import_raw)
+                                    if not imported_records:
+                                        st.warning("Nem találtam importálható markdown-hierarchiát.")
+                                    else:
+                                        st.session_state["context_graph_selected_record_id"] = imported_records[0].record_id
+                                        persist_records_bulk(
+                                            records + imported_records,
+                                            source_dir,
+                                            config,
+                                            records_path,
+                                            index_path,
+                                            chroma_dir,
+                                            history_events_path,
+                                            f"Markdown hierarchy import kész: {len(imported_records)} új node.",
+                                        )
                             st.markdown("**Kapcsolatok itt helyben**")
                             relation_records = [record for record in records if record.record_id != selected_record.record_id]
                             current_edges = normalize_graph_edges(selected_record.graph_edges, selected_record.relations, selected_record.record_id)
@@ -2533,8 +3054,10 @@ def app() -> None:
 
     with tab_search:
         st.subheader("Kereses")
-        query = st.text_input("Kerdes vagy kulcsszo", key="search_query")
-        if st.button("Kereses inditasa"):
+        with st.form("search_form", clear_on_submit=False):
+            query = st.text_input("Kerdes vagy kulcsszo", key="search_query")
+            submitted = st.form_submit_button("Kereses inditasa")
+        if submitted:
             chunks = load_index(index_path)
             st.session_state["search_results"] = search_chunks(chunks, query, limit=10)
         results = st.session_state.get("search_results", [])
@@ -2567,7 +3090,7 @@ def app() -> None:
                         st.session_state["execution_selected_record_id"] = chunk.record_id
                         matching_record = next((record for record in records if record.record_id == chunk.record_id), None)
                         if matching_record and matching_record.planning_bucket:
-                            st.session_state["execution_filter_bucket"] = matching_record.planning_bucket
+                            st.session_state["pending_execution_filter_bucket"] = matching_record.planning_bucket
                         st.session_state["pending_main_tab"] = "Execution Graph"
                         st.rerun()
                 st.divider()
