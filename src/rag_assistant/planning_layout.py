@@ -8,6 +8,7 @@ from pathlib import Path
 
 
 SLUG_RE = re.compile(r"[^a-z0-9]+")
+WEEKDAY_TITLES = ["Hétfő", "Kedd", "Szerda", "Csütörtök", "Péntek", "Szombat", "Vasárnap"]
 
 
 def slugify(value: str) -> str:
@@ -21,20 +22,20 @@ def _week_title(start: date) -> str:
 
 
 def _weekday_title(day_value: date) -> str:
-    return day_value.strftime("%A")
+    return WEEKDAY_TITLES[day_value.weekday()]
 
 
 def _default_day(day_value: date, include_current_blocks: bool = False) -> dict:
     day_key = f"day-{day_value.isoformat()}"
     blocks = [
-        {"key": f"{day_key}-must", "title": "Mindenkepp", "lane": "must"},
-        {"key": f"{day_key}-prefer", "title": "Lehetoleg", "lane": "prefer"},
+        {"key": f"{day_key}-must", "title": "Mindenképp", "lane": "must"},
+        {"key": f"{day_key}-prefer", "title": "Lehetőleg", "lane": "prefer"},
     ]
     if include_current_blocks:
         blocks = [
-            {"key": f"{day_key}-focus", "title": "Fo fokusz most", "lane": "focus"},
-            {"key": f"{day_key}-must", "title": "Ma mindenkep", "lane": "must"},
-            {"key": f"{day_key}-prefer", "title": "Lehetoleg ma", "lane": "prefer"},
+            {"key": f"{day_key}-focus", "title": "Fő fókusz", "lane": "focus"},
+            {"key": f"{day_key}-must", "title": "Mindenképp", "lane": "must"},
+            {"key": f"{day_key}-prefer", "title": "Lehetőleg", "lane": "prefer"},
         ]
     return {
         "key": day_key,
@@ -76,7 +77,7 @@ def _migrate_legacy_layout(payload: dict) -> dict:
     groups = payload.get("groups", [])
     fallback_week = {
         "key": "week-legacy",
-        "title": "Atvett blokkok",
+        "title": "Átvett blokkok",
         "start_date": None,
         "days": [],
     }
@@ -121,8 +122,26 @@ def save_planning_layout(path: Path, layout: dict) -> None:
 def ensure_layout(path: Path) -> dict:
     layout = load_planning_layout(path)
     layout = ensure_standard_weeks(layout)
+    layout = normalize_layout_labels(layout)
     if not path.exists():
         save_planning_layout(path, layout)
+    return layout
+
+
+def normalize_layout_labels(layout: dict) -> dict:
+    for week in layout.get("weeks", []):
+        for day in week.get("days", []):
+            day_date_raw = day.get("date")
+            if day_date_raw and not day.get("custom_title"):
+                day["title"] = _weekday_title(date.fromisoformat(day_date_raw))
+            for block in day.get("blocks", []):
+                lane = block.get("lane", "session")
+                if lane == "focus":
+                    block["title"] = "Fő fókusz"
+                elif lane == "must":
+                    block["title"] = "Mindenképp"
+                elif lane == "prefer":
+                    block["title"] = "Lehetőleg"
     return layout
 
 
@@ -189,12 +208,12 @@ def add_day(layout: dict, week_key: str, day_date_value: str, title: str | None 
     day_key = f"day-{day_date.isoformat()}-{uuid.uuid4().hex[:4]}"
     day = {
         "key": day_key,
-        "title": title.strip() if title else day_date.strftime("%A"),
+        "title": title.strip() if title else _weekday_title(day_date),
         "custom_title": bool(title and title.strip()),
         "date": day_date.isoformat(),
         "blocks": [
-            {"key": f"{day_key}-must", "title": "Mindenkepp", "lane": "must"},
-            {"key": f"{day_key}-prefer", "title": "Lehetoleg", "lane": "prefer"},
+            {"key": f"{day_key}-must", "title": "Mindenképp", "lane": "must"},
+            {"key": f"{day_key}-prefer", "title": "Lehetőleg", "lane": "prefer"},
         ],
     }
     for week in layout.get("weeks", []):

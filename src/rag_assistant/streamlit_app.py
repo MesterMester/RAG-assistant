@@ -11,6 +11,7 @@ import streamlit.components.v1 as components
 from rag_assistant.config import load_config
 from rag_assistant.context_graph_component import context_graph
 from rag_assistant.execution_dnd_component import execution_dnd_board
+from rag_assistant.history import load_events
 from rag_assistant.index_store import load_index, save_index
 from rag_assistant.ingest import build_index
 from rag_assistant.kanban_dnd_component import kanban_dnd_board
@@ -37,6 +38,7 @@ from rag_assistant.search import search_chunks
 from rag_assistant.vector_store import VectorStoreError, upsert_manual_records
 
 STATUS_OPTIONS = ["inbox", "next", "active", "waiting", "done", "cancelled", "archived"]
+RELATION_TYPE_OPTIONS = ["related_to", "depends_on", "blocks", "supports", "decision_for", "references"]
 ENTITY_OPTIONS = [
     "organization",
     "team",
@@ -71,6 +73,55 @@ def record_label(record: KnowledgeRecord) -> str:
     path_bits = [bit for bit in [record.organization, record.team, record.project, record.case_name] if bit]
     suffix = f" [{' / '.join(path_bits)}]" if path_bits else ""
     return f"{record.title} ({record.entity_type}){suffix}"
+
+
+def normalize_graph_edges(graph_edges: list[dict] | None, fallback_relations: list[str] | None = None, self_id: str = "") -> list[dict]:
+    normalized: list[dict] = []
+    for item in graph_edges or []:
+        if not isinstance(item, dict):
+            continue
+        target_id = str(item.get("target_id", "")).strip()
+        relation_type = str(item.get("relation_type", "")).strip() or "related_to"
+        label = str(item.get("label", "")).strip()
+        if not target_id or target_id == self_id:
+            continue
+        normalized.append({"target_id": target_id, "relation_type": relation_type, "label": label})
+    if not normalized:
+        normalized = [
+            {"target_id": relation_id.strip(), "relation_type": "related_to", "label": ""}
+            for relation_id in (fallback_relations or [])
+            if relation_id.strip() and relation_id.strip() != self_id
+        ]
+    seen: set[tuple[str, str, str]] = set()
+    deduped: list[dict] = []
+    for item in normalized:
+        edge_key = (item["target_id"], item["relation_type"], item["label"])
+        if edge_key in seen:
+            continue
+        seen.add(edge_key)
+        deduped.append(item)
+    return deduped
+
+
+def graph_edges_to_relations(graph_edges: list[dict]) -> list[str]:
+    relations: list[str] = []
+    seen: set[str] = set()
+    for item in graph_edges:
+        target_id = str(item.get("target_id", "")).strip()
+        if target_id and target_id not in seen:
+            seen.add(target_id)
+            relations.append(target_id)
+    return relations
+
+
+def reconcile_graph_edges_with_relations(existing_edges: list[dict], relation_ids: list[str], self_id: str = "") -> list[dict]:
+    preserved = [item for item in normalize_graph_edges(existing_edges, self_id=self_id) if item.get("relation_type") != "related_to"]
+    related_edges = [
+        {"target_id": relation_id, "relation_type": "related_to", "label": ""}
+        for relation_id in relation_ids
+        if relation_id and relation_id != self_id
+    ]
+    return normalize_graph_edges(preserved + related_edges, self_id=self_id)
 
 
 def update_record(existing: KnowledgeRecord, **changes) -> KnowledgeRecord:
@@ -194,20 +245,21 @@ def persist_layout_and_records(
 
 
 def day_display_title(day_date: date, today: date) -> str:
+    weekday_titles = ["Hétfő", "Kedd", "Szerda", "Csütörtök", "Péntek", "Szombat", "Vasárnap"]
     if day_date == today:
         return "Ma"
     if day_date == today + timedelta(days=1):
         return "Holnap"
     if day_date == today + timedelta(days=2):
-        return "Holnaputan"
-    return day_date.strftime("%A")
+        return "Holnapután"
+    return weekday_titles[day_date.weekday()]
 
 
 def build_execution_sections(layout: dict) -> list[dict]:
     today = date.today()
     current_week_start = today - timedelta(days=today.weekday())
-    next_week_start = current_week_start + timedelta(days=7)
     current_week_end = current_week_start + timedelta(days=6)
+    next_week_start = current_week_start + timedelta(days=7)
     next_week_end = next_week_start + timedelta(days=6)
 
     day_lookup: dict[str, dict] = {}
@@ -228,10 +280,9 @@ def build_execution_sections(layout: dict) -> list[dict]:
                 continue
             existing_week_start = existing.get("week_start_date") or ""
             current_week_start_value = week.get("start_date") or ""
-            current_is_legacy = not current_week_start_value
-            existing_is_legacy = not existing_week_start
-            if existing_is_legacy and not current_is_legacy:
+            if not existing_week_start and current_week_start_value:
                 day_lookup[day_date_raw] = display_day
+
     all_days = sorted(day_lookup.values(), key=lambda item: item["date_obj"])
 
     def serialize_day(day: dict) -> dict:
@@ -240,12 +291,9 @@ def build_execution_sections(layout: dict) -> list[dict]:
         return serialized_day
 
     def make_group(key: str, title: str, days: list[dict], meta: str = "") -> dict:
-        serialized_days = []
-        for day in days:
-            serialized_days.append(serialize_day(day))
-        return {"key": key, "title": title, "meta": meta, "days": serialized_days}
+        return {"key": key, "title": title, "meta": meta, "days": [serialize_day(day) for day in days]}
 
-    def make_past_archive_group(key: str, title: str, days: list[dict], meta: str = "") -> dict:
+    def make_archive_group(key: str, title: str, days: list[dict], meta: str = "") -> dict:
         alias_keys: list[str] = []
         for day in days:
             for block in day.get("blocks", []):
@@ -260,7 +308,7 @@ def build_execution_sections(layout: dict) -> list[dict]:
                 {
                     "key": f"{key}-archive-bucket",
                     "title": title,
-                    "lane": "parking",
+                    "lane": "session",
                     "alias_keys": alias_keys,
                     "droppable": False,
                     "sort": "date_desc",
@@ -275,7 +323,7 @@ def build_execution_sections(layout: dict) -> list[dict]:
         week_end = week_start + timedelta(days=6)
         return make_group(
             f"week-{week_start.isoformat()}",
-            f"{week_no}. het",
+            f"{week_no}. hét",
             days,
             f"{week_start.strftime('%m.%d')} - {week_end.strftime('%m.%d')}",
         )
@@ -284,8 +332,7 @@ def build_execution_sections(layout: dict) -> list[dict]:
         merged: list[dict] = []
         weekend_days = [day for day in days if day["date_obj"].weekday() >= 5]
         normal_days = [day for day in days if day["date_obj"].weekday() < 5]
-        for day in normal_days:
-            merged.append(day)
+        merged.extend(normal_days)
         if weekend_days:
             saturday = min(weekend_days, key=lambda item: item["date_obj"])
             must_aliases: list[str] = []
@@ -298,45 +345,62 @@ def build_execution_sections(layout: dict) -> list[dict]:
                         must_aliases.append(block.get("key", ""))
                     elif lane == "prefer":
                         prefer_aliases.append(block.get("key", ""))
+                    elif lane == "focus":
+                        continue
                     else:
                         merged_block = dict(block)
                         merged_block["title"] = f"{day.get('title', '')} - {block.get('title', '')}"
                         merged_block["alias_keys"] = [block.get("key", "")]
                         session_blocks.append(merged_block)
             blocks = [
-                {
-                    "key": f"{saturday['key']}-weekend-must",
-                    "title": "Mindenkepp",
-                    "lane": "must",
-                    "alias_keys": [key for key in must_aliases if key],
-                    "drop_target_key": must_aliases[0] if must_aliases else "",
-                },
-                {
-                    "key": f"{saturday['key']}-weekend-prefer",
-                    "title": "Lehetoleg",
-                    "lane": "prefer",
-                    "alias_keys": [key for key in prefer_aliases if key],
-                    "drop_target_key": prefer_aliases[0] if prefer_aliases else "",
-                },
+                {"key": f"{saturday['key']}-weekend-must", "title": "Mindenképp", "lane": "must", "alias_keys": [key for key in must_aliases if key], "drop_target_key": must_aliases[0] if must_aliases else ""},
+                {"key": f"{saturday['key']}-weekend-prefer", "title": "Lehetőleg", "lane": "prefer", "alias_keys": [key for key in prefer_aliases if key], "drop_target_key": prefer_aliases[0] if prefer_aliases else ""},
                 *session_blocks,
             ]
-            merged.append(
-                {
-                    "key": f"weekend-{'-'.join(day['key'] for day in weekend_days)}",
-                    "title": "Hetvege",
-                    "date": weekend_days[0]["date"],
-                    "blocks": blocks,
-                    "date_obj": weekend_days[0]["date_obj"],
-                }
-            )
+            merged.append({
+                "key": f"weekend-{'-'.join(day['key'] for day in weekend_days)}",
+                "title": "Hétvége",
+                "date": weekend_days[0]["date"],
+                "blocks": blocks,
+                "date_obj": weekend_days[0]["date_obj"],
+            })
         return merged
+
+    def clone_day(day: dict, title: str | None = None, include_lanes: set[str] | None = None, exclude_lanes: set[str] | None = None, key_suffix: str = "view") -> dict | None:
+        blocks = []
+        for block in day.get("blocks", []):
+            lane = block.get("lane", "session")
+            if include_lanes is not None and lane not in include_lanes:
+                continue
+            if exclude_lanes is not None and lane in exclude_lanes:
+                continue
+            blocks.append(dict(block))
+        if not blocks:
+            return None
+        cloned = dict(day)
+        cloned["key"] = f"{day.get('key', 'day')}-{key_suffix}"
+        if title is not None:
+            cloned["title"] = title
+        cloned["blocks"] = blocks
+        return cloned
+
+    today_day = next((day for day in all_days if day["date_obj"] == today), None)
+    main_focus_group_days: list[dict] = []
+    today_group_days: list[dict] = []
+    if today_day:
+        focus_day = clone_day(today_day, title="Fő fókusz most", include_lanes={"focus"}, key_suffix="focus")
+        if focus_day:
+            main_focus_group_days.append(focus_day)
+        main_day = clone_day(today_day, title="Ma", exclude_lanes={"focus"}, key_suffix="today")
+        if main_day:
+            today_group_days.append(main_day)
 
     yesterday = today - timedelta(days=1)
     day_before = today - timedelta(days=2)
-
     past_yesterday = [dict(day, title="Tegnap") for day in all_days if day["date_obj"] == yesterday]
-    past_day_before = [dict(day, title="Tegnapelott") for day in all_days if day["date_obj"] == day_before]
-    past_archive = [day for day in all_days if day["date_obj"] < day_before]
+    past_day_before = [dict(day, title="Tegnapelőtt") for day in all_days if day["date_obj"] == day_before]
+    past_this_week = [day for day in all_days if current_week_start <= day["date_obj"] < day_before]
+    older_past = [day for day in all_days if day["date_obj"] < current_week_start]
 
     future_tomorrow = [dict(day, title="Holnap") for day in all_days if day["date_obj"] == today + timedelta(days=1)]
     future_this_week = [day for day in all_days if today + timedelta(days=2) <= day["date_obj"] <= current_week_end]
@@ -350,27 +414,29 @@ def build_execution_sections(layout: dict) -> list[dict]:
             future_later_weeks.append(make_week_group(week_start, merge_weekend(week_days)))
 
     sections: list[dict] = [
-        {"key": "today", "title": "Ma", "groups": [make_group("today", "Ma", [dict(day, title="Ma") for day in all_days if day["date_obj"] == today])]},
+        {"key": "main_focus", "title": "Fő fókusz most", "groups": [make_group("main_focus", "Fő fókusz most", main_focus_group_days)]},
+        {"key": "today", "title": "Ma", "groups": [make_group("today", "Ma", today_group_days)]},
         {
             "key": "past",
-            "title": "Mult",
+            "title": "Múlt",
             "groups": [
                 make_group("yesterday", "Tegnap", past_yesterday),
-                make_group("day_before", "Tegnapelott", past_day_before),
-                make_past_archive_group("past_archive", "Korabbi dolgok", past_archive, "Legujabb felul"),
+                make_group("day_before", "Tegnapelőtt", past_day_before),
+                make_archive_group("earlier_this_week", "Korábban a héten", past_this_week, "Legújabb felül"),
+                make_archive_group("older", "Régebb", older_past, "Legújabb felül"),
             ],
         },
         {
             "key": "future",
-            "title": "Jovo",
+            "title": "Jövő",
             "groups": [
                 make_group("tomorrow", "Holnap", future_tomorrow),
-                make_group("this_week", "A heten", merge_weekend(future_this_week)),
-                make_group("next_week", "Jovo het", merge_weekend(future_next_week)),
+                make_group("this_week", "A héten", merge_weekend(future_this_week)),
+                make_group("next_week", "Jövő hét", merge_weekend(future_next_week)),
                 *future_later_weeks,
             ],
         },
-        {"key": "unscheduled", "title": "Idopont nelkul", "groups": [make_group("unscheduled", "Idopont nelkul", [])]},
+        {"key": "unscheduled", "title": "Ütemezés nélkül", "groups": [make_group("unscheduled", "Ütemezés nélkül", [])]},
     ]
     return sections
 
@@ -396,11 +462,12 @@ def parse_optional_date(value: str | None) -> date | None:
 def persist_record(record: KnowledgeRecord, source_dir, config, records_path, index_path, chroma_dir, history_path) -> None:
     saved = upsert_record(records_path, record, history_path=history_path, source="ui")
     st.session_state["selected_record_id"] = saved.record_id
+    st.session_state["execution_selected_record_id"] = saved.record_id
     refreshed_records = load_records(records_path)
     chunks = build_index(source_dir, config)
     save_index(index_path, chunks)
     st.success(f"Mentve: {saved.record_id}")
-    st.info(f"Keyword index frissitve: {len(chunks)} chunk")
+    st.info(f"Keyword index frissítve: {len(chunks)} chunk")
     try:
         count = upsert_manual_records(refreshed_records, chroma_dir, config.ollama_embed_model)
         st.info(f"Chroma upsert kesz: {count} rekord.")
@@ -456,7 +523,7 @@ def persist_records_bulk(records: list[KnowledgeRecord], source_dir, config, rec
     chunks = build_index(source_dir, config)
     save_index(index_path, chunks)
     st.success(success_message)
-    st.info(f"Keyword index frissitve: {len(chunks)} chunk")
+    st.info(f"Keyword index frissítve: {len(chunks)} chunk")
     try:
         count = upsert_manual_records(refreshed_records, chroma_dir, config.ollama_embed_model)
         st.info(f"Chroma upsert kesz: {count} rekord.")
@@ -486,6 +553,7 @@ def record_from_table_row(row: dict, existing: KnowledgeRecord) -> KnowledgeReco
         related_people=parse_csv_list(normalize_table_value(row.get("people"))),
         tags=parse_csv_list(normalize_table_value(row.get("tags"))),
         decision_needed=bool(row.get("decision_needed")),
+        graph_edges=list(existing.graph_edges),
         start_at=start_at,
         due_at=due_at,
         deadline=deadline,
@@ -871,6 +939,7 @@ def render_record_editor(
     )
     with relation_col:
         relations = render_relations_selector(records, record.relations, key_prefix)
+    graph_edges = reconcile_graph_edges_with_relations(record.graph_edges, relations, record.record_id)
 
     date_col1, date_col2, date_col3, date_col4 = st.columns(4)
     if show_schedule:
@@ -965,6 +1034,7 @@ def render_record_editor(
         "content": content.strip(),
         "tags": [item.strip() for item in tags_raw.split(",") if item.strip()],
         "relations": relations,
+        "graph_edges": graph_edges,
         "decision_needed": decision_needed,
         "decision_context": decision_context.strip(),
         "start_at": start_at.isoformat() if isinstance(start_at, date) else None,
@@ -1165,14 +1235,23 @@ def build_context_graph_payload(records: list[KnowledgeRecord], selected_node_id
             "synthetic": synthetic,
         }
 
-    def add_edge(source: str, target: str, kind: str) -> None:
+    def add_edge(source: str, target: str, kind: str, relation_type: str = "", label: str = "") -> None:
         if not source or not target or source == target:
             return
-        edge_key = (source, target, kind)
+        edge_key = (source, target, kind, relation_type, label)
         if edge_key in edge_keys:
             return
         edge_keys.add(edge_key)
-        edges.append({"id": f"{kind}:{source}:{target}", "source": source, "target": target, "kind": kind})
+        edges.append(
+            {
+                "id": f"{kind}:{relation_type}:{source}:{target}:{label}",
+                "source": source,
+                "target": target,
+                "kind": kind,
+                "relation_type": relation_type,
+                "label": label,
+            }
+        )
 
     for record in records:
         add_node(
@@ -1235,9 +1314,16 @@ def build_context_graph_payload(records: list[KnowledgeRecord], selected_node_id
                     add_edge(parent_node, record.record_id, "hierarchy")
 
         if show_relations and not show_only_hierarchy:
-            for relation_id in record.relations:
+            for edge in normalize_graph_edges(record.graph_edges, record.relations, record.record_id):
+                relation_id = edge.get("target_id", "")
                 if relation_id in filtered_lookup:
-                    add_edge(record.record_id, relation_id, "relation")
+                    add_edge(
+                        record.record_id,
+                        relation_id,
+                        "relation",
+                        relation_type=edge.get("relation_type", "related_to"),
+                        label=edge.get("label", ""),
+                    )
 
     return {
         "mode": mode,
@@ -1410,9 +1496,9 @@ def render_execution_layout_manager(layout: dict, layout_path) -> None:
         st.caption("Kezzel felvett blokk torlese: a jobb oldali execution nezet napjanal a blokk melletti `x` gombbal.")
 
 
-def render_execution_graph(records: list[KnowledgeRecord], layout: dict, layout_path, source_dir, config, records_path, index_path, chroma_dir) -> None:
+def render_execution_graph(records: list[KnowledgeRecord], layout: dict, layout_path, source_dir, config, records_path, index_path, chroma_dir, history_path) -> None:
     st.subheader("Execution Graph")
-    st.caption("Vizualis, drag-and-drop planning felulet het -> nap -> blokk szerkezettel. A blokkhoz tartozo nap datuma a task `due` mezojevel kerul osszhangba, a `deadline` ettol fuggetlen marad.")
+    st.caption("Vizuális, drag-and-drop planning felület hét -> nap -> blokk szerkezettel. A blokkhoz tartozó nap dátuma a task `due` mezőjével kerül összhangba, a `deadline` ettől független marad.")
     render_execution_layout_manager(layout, layout_path)
 
     task_records = [record for record in records if record.entity_type == "task"]
@@ -1462,6 +1548,7 @@ def render_execution_graph(records: list[KnowledgeRecord], layout: dict, layout_
                 records_path,
                 index_path,
                 chroma_dir,
+                history_path,
             )
     if isinstance(drag_result, dict) and drag_result.get("action") == "add_block":
         day_key = str(drag_result.get("day_key", "")).strip()
@@ -1495,22 +1582,96 @@ def render_execution_graph(records: list[KnowledgeRecord], layout: dict, layout_
                 records_path,
                 index_path,
                 chroma_dir,
-                "Blokk torolve, a taskok aznapi Mindenkepp blokkba kerultek.",
+                history_path,
+                "Blokk törölve, a taskok aznapi Mindenképp blokkba kerültek.",
             )
 
     known_bucket_keys = {bucket.get("key", "") for bucket in iter_buckets(layout)}
     orphan_tasks = [record for record in task_records if record.planning_bucket and record.planning_bucket not in known_bucket_keys]
     if orphan_tasks:
-        st.warning("Van olyan task, ami mar nem letezo bucketbe mutat. Ezeket erdemes ujra elhelyezni.")
+        st.warning("Van olyan task, ami már nem létező blokkba mutat. Ezeket érdemes újra elhelyezni.")
         for record in orphan_tasks:
             st.write(f"{record.title} -> {record.planning_bucket}")
+
+    st.divider()
+    st.markdown("**Task history**")
+    valid_task_ids = [record.record_id for record in task_records]
+    selected_execution_id = st.session_state.get("execution_selected_record_id")
+    if selected_execution_id not in valid_task_ids and valid_task_ids:
+        selected_execution_id = valid_task_ids[0]
+        st.session_state["execution_selected_record_id"] = selected_execution_id
+
+    if valid_task_ids:
+        selected_execution_id = st.selectbox(
+            "Task kiválasztása",
+            options=valid_task_ids,
+            index=valid_task_ids.index(selected_execution_id) if selected_execution_id in valid_task_ids else 0,
+            format_func=lambda record_id: record_label(next(record for record in task_records if record.record_id == record_id)),
+            key="execution_history_record_picker",
+        )
+        st.session_state["execution_selected_record_id"] = selected_execution_id
+        selected_task = next((record for record in task_records if record.record_id == selected_execution_id), None)
+        if selected_task:
+            action_col1, action_col2 = st.columns([1, 1])
+            if action_col1.button("Részlet", key=f"execution_open_detail_{selected_task.record_id}"):
+                st.session_state["selected_record_id"] = selected_task.record_id
+                st.rerun()
+            history_toggle_key = f"execution_show_history_{selected_task.record_id}"
+            if action_col2.button("History", key=f"execution_history_toggle_{selected_task.record_id}"):
+                st.session_state[history_toggle_key] = not st.session_state.get(history_toggle_key, False)
+            if st.session_state.get(history_toggle_key, False):
+                render_record_history(history_path, selected_task.record_id, key_prefix=f"execution_{selected_task.record_id}")
+
+
+def render_record_history(history_path, record_id: str, key_prefix: str = "history") -> None:
+    events = [event for event in reversed(load_events(history_path)) if event.get("record_id") == record_id]
+    if not events:
+        st.info("Ehhez a rekordhoz még nincs naplózott előzmény.")
+        return
+    for event in events[:30]:
+        changed = ", ".join(event.get("changed_fields", [])) or "-"
+        st.markdown(f"**{event.get('action_type', '-') }**  `{event.get('timestamp', '-')}`")
+        st.caption(f"forrás: {event.get('source', '-')} | mezők: {changed}")
+        if event.get("movement"):
+            movement = event["movement"]
+            st.caption(f"áthelyezés: {movement.get('from', '') or 'nincs'} -> {movement.get('to', '') or 'nincs'}")
+        before = event.get("before") or {}
+        after = event.get("after") or {}
+        with st.expander("Részletek", expanded=False):
+            st.write({"előtte": before, "utána": after})
+
+
+def inject_app_shell_css() -> None:
+    st.markdown(
+        """
+        <style>
+        .rag-topline {
+          position: sticky; top: 0; z-index: 1000;
+          background: rgba(255,255,255,0.96); backdrop-filter: blur(8px);
+          padding: 6px 0 10px 0; margin-bottom: 2px;
+          font-size: 0.98rem; font-weight: 600; color: #334155; white-space: nowrap; overflow-x: auto;
+        }
+        div[data-testid="stTabs"] > div:first-child {
+          position: sticky; top: 34px; z-index: 999; background: rgba(255,255,255,0.97); padding-top: 4px;
+        }
+        div[data-testid="stTabs"] button[role="tab"] {
+          font-size: 0.95rem;
+        }
+        </style>
+        """,
+        unsafe_allow_html=True,
+    )
+
+
+def render_app_topline() -> None:
+    st.markdown('<div class="rag-topline">RAG asszisztens - domain-modellre épülő személyes tudás- és ügykezelő rendszer a privát RAG-DB fölött.</div>', unsafe_allow_html=True)
 
 
 def app() -> None:
     config = load_config()
     st.set_page_config(page_title="RAG asszisztens", layout="wide")
-    st.title("RAG asszisztens")
-    st.caption("Domain-modellre epulo kezi tudasbevitel, reszletnezet es szerkesztes a privat RAG-DB folott.")
+    inject_app_shell_css()
+    render_app_topline()
 
     if not config.source_dir:
         st.error("A .env fajlban hianyzik a RAG_SOURCE_DIR beallitas.")
@@ -1544,8 +1705,8 @@ def app() -> None:
         st.sidebar.write(record_label(selected_record))
         st.sidebar.caption(selected_record.record_id)
 
-    tab_input, tab_detail, tab_table, tab_kanban, tab_timeline, tab_execution, tab_mindmap, tab_search = st.tabs(
-        ["Bevitel", "Reszlet", "Tablazat", "Kanban", "Timeline", "Execution Graph", "Context Graph", "Kereses"]
+    tab_execution, tab_detail, tab_input, tab_table, tab_kanban, tab_timeline, tab_mindmap, tab_search = st.tabs(
+        ["Execution Graph", "Részlet", "Bevitel", "Táblázat", "Kanban", "Timeline", "Context Graph", "Keresés"]
     )
 
     with tab_input:
@@ -1570,7 +1731,8 @@ def app() -> None:
                     parent_id=create_values["parent_id"],
                     related_people=create_values["related_people"],
                     tags=create_values["tags"],
-                    relations=create_values["relations"],
+                    relations=graph_edges_to_relations(create_values["graph_edges"]),
+                    graph_edges=create_values["graph_edges"],
                     decision_needed=create_values["decision_needed"],
                     decision_context=create_values["decision_context"],
                     start_at=create_values["start_at"],
@@ -1586,7 +1748,7 @@ def app() -> None:
                 persist_record(record, source_dir, config, records_path, index_path, chroma_dir, history_events_path)
 
     with tab_detail:
-        st.subheader("Rekord reszlet es szerkesztes")
+        st.subheader("Rekord részlet és szerkesztés")
         if not records or not selected_record:
             st.info("Meg nincs kivalasztott rekord. Hozz letre egyet, vagy valassz egy meglevo rekordot a nezetekbol.")
         else:
@@ -1603,8 +1765,13 @@ def app() -> None:
 
             selected_record = next(record for record in records if record.record_id == st.session_state["selected_record_id"])
             st.caption(f"ID: {selected_record.record_id}")
-            st.write(f"Letrehozva: {selected_record.created_at}")
-            st.write(f"Utoljara frissitve: {selected_record.updated_at}")
+            st.write(f"Létrehozva: {selected_record.created_at}")
+            st.write(f"Utoljára frissítve: {selected_record.updated_at}")
+            history_toggle_key = f"show_history_{selected_record.record_id}"
+            if st.button("History", key=f"detail_history_toggle_{selected_record.record_id}"):
+                st.session_state[history_toggle_key] = not st.session_state.get(history_toggle_key, False)
+            if st.session_state.get(history_toggle_key, False):
+                render_record_history(history_events_path, selected_record.record_id, key_prefix=f"detail_{selected_record.record_id}")
 
             edit_values = render_record_editor(
                 f"edit_{selected_record.record_id}",
@@ -1629,7 +1796,8 @@ def app() -> None:
                     parent_id=edit_values["parent_id"],
                     related_people=edit_values["related_people"],
                     tags=edit_values["tags"],
-                    relations=edit_values["relations"],
+                    relations=graph_edges_to_relations(edit_values["graph_edges"]),
+                    graph_edges=edit_values["graph_edges"],
                     decision_needed=edit_values["decision_needed"],
                     decision_context=edit_values["decision_context"],
                     start_at=edit_values["start_at"],
@@ -1642,7 +1810,7 @@ def app() -> None:
                     planning_bucket=edit_values["planning_bucket"],
                     focus_rank=edit_values["focus_rank"],
                 )
-                persist_record(updated_record, source_dir, config, records_path, index_path, chroma_dir, history_events_path)
+                persist_record(with_synced_hierarchy_title(updated_record), source_dir, config, records_path, index_path, chroma_dir, history_events_path)
 
     with tab_table:
         st.subheader("Tablazat nezet")
@@ -1930,7 +2098,7 @@ def app() -> None:
             st.divider()
 
     with tab_execution:
-        render_execution_graph(records, planning_layout, planning_layout_path, source_dir, config, records_path, index_path, chroma_dir)
+        render_execution_graph(records, planning_layout, planning_layout_path, source_dir, config, records_path, index_path, chroma_dir, history_events_path)
 
     with tab_mindmap:
         st.subheader("Context Graph")
@@ -2072,7 +2240,7 @@ def app() -> None:
                                 allow_parent_edit=False,
                             )
                             with action_placeholder.container():
-                                action_col1, action_col2, action_col3 = st.columns(3)
+                                action_col1, action_col2, action_col3, action_col4, action_col5 = st.columns(5)
                                 if action_col1.button("Mentés", key="save_context_graph_record"):
                                     updated_record = update_record(
                                         selected_record,
@@ -2088,7 +2256,8 @@ def app() -> None:
                                         parent_id=edit_values["parent_id"],
                                         related_people=edit_values["related_people"],
                                         tags=edit_values["tags"],
-                                        relations=edit_values["relations"],
+                                        relations=graph_edges_to_relations(edit_values["graph_edges"]),
+                                        graph_edges=edit_values["graph_edges"],
                                         decision_needed=edit_values["decision_needed"],
                                         decision_context=edit_values["decision_context"],
                                         start_at=edit_values["start_at"],
@@ -2119,9 +2288,97 @@ def app() -> None:
                                     )
                                     st.session_state["context_graph_selected_record_id"] = child_record.record_id
                                     persist_record(child_record, source_dir, config, records_path, index_path, chroma_dir, history_events_path)
-                                if action_col3.button("Reszlet", key="open_from_context_graph"):
+                                if action_col3.button("Add sibling", key="add_sibling_context_graph"):
+                                    sibling_record = KnowledgeRecord(
+                                        record_id=build_record_id("Uj sibling"),
+                                        title="Uj sibling",
+                                        summary="",
+                                        content="",
+                                        source_type="manual",
+                                        entity_type="note",
+                                        status="inbox",
+                                        organization=selected_record.organization,
+                                        team=selected_record.team,
+                                        project=selected_record.project,
+                                        case_name=selected_record.case_name,
+                                        parent_id=selected_record.parent_id,
+                                    )
+                                    st.session_state["context_graph_selected_record_id"] = sibling_record.record_id
+                                    persist_record(sibling_record, source_dir, config, records_path, index_path, chroma_dir, history_events_path)
+                                if action_col4.button("Részlet", key="open_from_context_graph"):
                                     st.session_state["selected_record_id"] = selected_record.record_id
                                     st.rerun()
+                                if action_col5.button("History", key="open_history_context_graph"):
+                                    st.session_state[f"context_history_{selected_record.record_id}"] = not st.session_state.get(f"context_history_{selected_record.record_id}", False)
+                            st.markdown("**Kapcsolatok itt helyben**")
+                            relation_records = [record for record in records if record.record_id != selected_record.record_id]
+                            current_edges = normalize_graph_edges(selected_record.graph_edges, selected_record.relations, selected_record.record_id)
+                            if current_edges:
+                                for index, edge in enumerate(current_edges):
+                                    target_id = edge.get("target_id", "")
+                                    target_record = next((record for record in records if record.record_id == target_id), None)
+                                    edge_title = record_label(target_record) if target_record else target_id
+                                    edge_type = edge.get("relation_type", "related_to")
+                                    edge_label = edge.get("label", "")
+                                    row_col1, row_col2 = st.columns([6, 1])
+                                    row_col1.caption(
+                                        f"{edge_type} -> {edge_title}" + (f" | {edge_label}" if edge_label else "")
+                                    )
+                                    if row_col2.button("×", key=f"context_remove_relation_{selected_record.record_id}_{index}"):
+                                        updated_edges = [item for item_index, item in enumerate(current_edges) if item_index != index]
+                                        updated_record = update_record(
+                                            selected_record,
+                                            graph_edges=updated_edges,
+                                            relations=graph_edges_to_relations(updated_edges),
+                                        )
+                                        persist_record(updated_record, source_dir, config, records_path, index_path, chroma_dir, history_events_path)
+                            else:
+                                st.caption("Ehhez a rekordhoz még nincs külön graph-kapcsolat.")
+
+                            add_relation_col1, add_relation_col2 = st.columns(2)
+                            relation_target_id = add_relation_col1.selectbox(
+                                "Kapcsolat célpont",
+                                options=[""] + [record.record_id for record in relation_records],
+                                index=0,
+                                format_func=lambda record_id: "Valassz rekordot"
+                                if not record_id
+                                else record_label(next(record for record in relation_records if record.record_id == record_id)),
+                                key=f"context_relation_target_{selected_record.record_id}",
+                            )
+                            relation_type = add_relation_col2.selectbox(
+                                "Kapcsolat típusa",
+                                options=RELATION_TYPE_OPTIONS,
+                                key=f"context_relation_type_{selected_record.record_id}",
+                            )
+                            relation_label = st.text_input(
+                                "Kapcsolat címke",
+                                value="",
+                                placeholder="opcionalis",
+                                key=f"context_relation_label_{selected_record.record_id}",
+                            )
+                            if st.button("Add relation", key=f"add_relation_context_graph_{selected_record.record_id}"):
+                                if not relation_target_id:
+                                    st.warning("Valassz ki egy cel rekordot a kapcsolathoz.")
+                                else:
+                                    next_edges = normalize_graph_edges(
+                                        current_edges
+                                        + [
+                                            {
+                                                "target_id": relation_target_id,
+                                                "relation_type": relation_type,
+                                                "label": relation_label.strip(),
+                                            }
+                                        ],
+                                        self_id=selected_record.record_id,
+                                    )
+                                    updated_record = update_record(
+                                        selected_record,
+                                        graph_edges=next_edges,
+                                        relations=graph_edges_to_relations(next_edges),
+                                    )
+                                    persist_record(updated_record, source_dir, config, records_path, index_path, chroma_dir, history_events_path)
+                            if st.session_state.get(f"context_history_{selected_record.record_id}", False):
+                                render_record_history(history_events_path, selected_record.record_id, key_prefix=f"context_{selected_record.record_id}")
 
                 st.caption("Phase A: szurheto, kattinthato es ugyanazon a tabon szerkesztheto Context Graph. A teljes vizualis edge-szerkesztes es a kulon Graph nezet a kovetkezo fazisba tartozik.")
 

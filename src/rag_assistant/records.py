@@ -60,6 +60,44 @@ def normalize_records(records: list[KnowledgeRecord]) -> tuple[list[KnowledgeRec
         record.case_name = resolve_reference(record.case_name, "case")
         record.parent_id = (record.parent_id or "").strip()
         record.planning_bucket = (record.planning_bucket or "").strip()
+        normalized_edges: list[dict] = []
+        for item in record.graph_edges or []:
+            if not isinstance(item, dict):
+                continue
+            target_id = str(item.get("target_id", "")).strip()
+            relation_type = str(item.get("relation_type", "")).strip() or "related_to"
+            label = str(item.get("label", "")).strip()
+            if not target_id or target_id == record.record_id:
+                continue
+            normalized_edges.append(
+                {
+                    "target_id": target_id,
+                    "relation_type": relation_type,
+                    "label": label,
+                }
+            )
+        if not normalized_edges and record.relations:
+            normalized_edges = [
+                {"target_id": relation_id.strip(), "relation_type": "related_to", "label": ""}
+                for relation_id in record.relations
+                if relation_id.strip() and relation_id.strip() != record.record_id
+            ]
+        deduped_edges: list[dict] = []
+        seen_edges: set[tuple[str, str, str]] = set()
+        for item in normalized_edges:
+            edge_key = (item["target_id"], item["relation_type"], item["label"])
+            if edge_key in seen_edges:
+                continue
+            seen_edges.add(edge_key)
+            deduped_edges.append(item)
+        record.graph_edges = deduped_edges
+        seen_relations: set[str] = set()
+        record.relations = []
+        for item in record.graph_edges:
+            target_id = item.get("target_id", "").strip()
+            if target_id and target_id not in seen_relations:
+                seen_relations.add(target_id)
+                record.relations.append(target_id)
 
         if record.entity_type == "organization" and not record.organization:
             record.organization = record.title

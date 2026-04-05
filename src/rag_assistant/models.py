@@ -58,6 +58,7 @@ class KnowledgeRecord:
     related_people: list[str] = field(default_factory=list)
     tags: list[str] = field(default_factory=list)
     relations: list[str] = field(default_factory=list)
+    graph_edges: list[dict] = field(default_factory=list)
     decision_needed: bool = False
     decision_context: str = ""
     created_at: str = field(default_factory=utc_now_iso)
@@ -81,6 +82,7 @@ class KnowledgeRecord:
         payload = dict(payload)
         payload.setdefault("tags", [])
         payload.setdefault("relations", [])
+        payload.setdefault("graph_edges", [])
         payload.setdefault("related_people", [])
         payload.setdefault("summary", "")
         payload.setdefault("content", "")
@@ -128,6 +130,11 @@ class KnowledgeRecord:
             " ".join(self.related_people),
             " ".join(self.tags),
             " ".join(self.relations),
+            " ".join(
+                " ".join(str(item.get(part, "")) for part in ["relation_type", "target_id", "label"])
+                for item in self.graph_edges
+                if isinstance(item, dict)
+            ),
             self.decision_context,
         ]
         return "\n".join(part for part in parts if part).strip()
