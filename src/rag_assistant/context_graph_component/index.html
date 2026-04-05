@@ -232,14 +232,14 @@
       }
       @media (max-width: 980px) {
         body {
-          height: auto;
-          overflow: auto;
+          height: 100vh;
+          overflow: hidden;
         }
         #app {
-          height: auto;
+          height: calc(100vh - 24px);
         }
         .shell {
-          min-height: 720px;
+          min-height: 540px;
         }
       }
     </style>
@@ -279,9 +279,9 @@
       }
 
       function setFrameHeight() {
-        const desktopHeight = Math.max(720, Math.min(window.innerHeight - 24, 1080));
-        const mobileHeight = document.documentElement.scrollHeight || document.body.scrollHeight || 900;
-        const height = window.innerWidth <= 980 ? mobileHeight : desktopHeight;
+        const desktopHeight = Math.max(680, Math.min(window.innerHeight - 28, 1080));
+        const mobileHeight = Math.max(760, document.documentElement.scrollHeight || document.body.scrollHeight || 900);
+        const height = window.innerWidth <= 640 ? mobileHeight : desktopHeight;
         postMessageToStreamlit("streamlit:setFrameHeight", { height });
       }
 
@@ -297,20 +297,20 @@
       }
 
       function readNumberStorage(key, fallback) {
-        const parsed = Number(sessionStorage.getItem(key));
+        const parsed = Number(localStorage.getItem(key));
         return Number.isFinite(parsed) ? parsed : fallback;
       }
 
       function readCollapsedState() {
         try {
-          return JSON.parse(sessionStorage.getItem(storageKey("collapsed_nodes")) || "{}");
+          return JSON.parse(localStorage.getItem(storageKey("collapsed_nodes")) || "{}");
         } catch (_error) {
           return {};
         }
       }
 
       function writeCollapsedState(state) {
-        sessionStorage.setItem(storageKey("collapsed_nodes"), JSON.stringify(state));
+        localStorage.setItem(storageKey("collapsed_nodes"), JSON.stringify(state));
       }
 
       function escapeHtml(value) {
@@ -550,11 +550,11 @@
         const availableWidth = Math.max(320, viewport.clientWidth - 80);
         const availableHeight = Math.max(240, viewport.clientHeight - 80);
         const nextZoom = Math.max(0.12, Math.min(2.6, Math.min(availableWidth / Math.max(layout.width, 1), availableHeight / Math.max(layout.height, 1))));
-        sessionStorage.setItem(storageKey("zoom"), String(Number(nextZoom.toFixed(2))));
+        localStorage.setItem(storageKey("zoom"), String(Number(nextZoom.toFixed(2))));
         const left = Math.max(0, pad + (layout.width * nextZoom - viewport.clientWidth) / 2);
         const top = Math.max(0, pad + (layout.height * nextZoom - viewport.clientHeight) / 2);
-        sessionStorage.setItem(storageKey("scroll_left"), String(left));
-        sessionStorage.setItem(storageKey("scroll_top"), String(top));
+        localStorage.setItem(storageKey("scroll_left"), String(left));
+        localStorage.setItem(storageKey("scroll_top"), String(top));
         render(payload);
       }
 
@@ -570,10 +570,25 @@
         };
       }
 
+      function centerSelectedNode(payload, viewport, layout, pad, zoom) {
+        const selectedId = payload.selected_node_id || "";
+        const pos = layout.positions.get(selectedId);
+        if (!pos) {
+          return {
+            left: Math.max(0, pad + (layout.width * zoom - viewport.clientWidth) / 2),
+            top: Math.max(0, pad + (layout.height * zoom - viewport.clientHeight) / 2),
+          };
+        }
+        return {
+          left: Math.max(0, pad + (pos.x + pos.w / 2) * zoom - viewport.clientWidth / 2),
+          top: Math.max(0, pad + (pos.y + pos.h / 2) * zoom - viewport.clientHeight / 2),
+        };
+      }
+
       function persistViewport(viewport) {
         if (!viewport) return;
-        sessionStorage.setItem(storageKey("scroll_left"), String(viewport.scrollLeft));
-        sessionStorage.setItem(storageKey("scroll_top"), String(viewport.scrollTop));
+        localStorage.setItem(storageKey("scroll_left"), String(viewport.scrollLeft));
+        localStorage.setItem(storageKey("scroll_top"), String(viewport.scrollTop));
       }
 
       function render(payload) {
@@ -660,13 +675,13 @@
             button.addEventListener("click", () => {
               const action = button.dataset.action || "";
               if (action === "fit" && viewport) {
-                sessionStorage.setItem(storageKey("auto_fit_done"), "1");
+                localStorage.setItem(storageKey("auto_fit_done"), "1");
                 fitToContent(payload, viewport, pad);
               } else if (action === "reset") {
-                sessionStorage.setItem(storageKey("zoom"), "1");
-                sessionStorage.removeItem(storageKey("scroll_left"));
-                sessionStorage.removeItem(storageKey("scroll_top"));
-                sessionStorage.removeItem(storageKey("auto_fit_done"));
+                localStorage.setItem(storageKey("zoom"), "1");
+                localStorage.removeItem(storageKey("scroll_left"));
+                localStorage.removeItem(storageKey("scroll_top"));
+                localStorage.removeItem(storageKey("auto_fit_done"));
                 render(payload);
               }
             });
@@ -724,13 +739,26 @@
           });
 
           if (viewport) {
-            const autoFitDone = sessionStorage.getItem(storageKey("auto_fit_done")) === "1";
+            const autoFitDone = localStorage.getItem(storageKey("auto_fit_done")) === "1";
+            const incomingForceFit = payload.force_fit_token || "";
+            const lastForceFit = localStorage.getItem(storageKey("force_fit_token")) || "";
+            if (incomingForceFit && incomingForceFit !== lastForceFit) {
+              const fitState = computeFitState(payload, viewport, pad);
+              const selectedCenter = centerSelectedNode(payload, viewport, layout, pad, fitState.zoom);
+              localStorage.setItem(storageKey("zoom"), String(Number(fitState.zoom.toFixed(2))));
+              localStorage.setItem(storageKey("scroll_left"), String(selectedCenter.left));
+              localStorage.setItem(storageKey("scroll_top"), String(selectedCenter.top));
+              localStorage.setItem(storageKey("auto_fit_done"), "1");
+              localStorage.setItem(storageKey("force_fit_token"), incomingForceFit);
+              render(payload);
+              return;
+            }
             if (!autoFitDone) {
               const fitState = computeFitState(payload, viewport, pad);
-              sessionStorage.setItem(storageKey("zoom"), String(Number(fitState.zoom.toFixed(2))));
-              sessionStorage.setItem(storageKey("scroll_left"), String(fitState.left));
-              sessionStorage.setItem(storageKey("scroll_top"), String(fitState.top));
-              sessionStorage.setItem(storageKey("auto_fit_done"), "1");
+              localStorage.setItem(storageKey("zoom"), String(Number(fitState.zoom.toFixed(2))));
+              localStorage.setItem(storageKey("scroll_left"), String(fitState.left));
+              localStorage.setItem(storageKey("scroll_top"), String(fitState.top));
+              localStorage.setItem(storageKey("auto_fit_done"), "1");
               render(payload);
               return;
             }
@@ -777,9 +805,9 @@
                 const pointerY = event.clientY - rect.top + viewport.scrollTop;
                 const sceneX = (pointerX - pad) / currentZoom;
                 const sceneY = (pointerY - pad) / currentZoom;
-                sessionStorage.setItem(storageKey("zoom"), String(Number(nextZoom.toFixed(2))));
-                sessionStorage.setItem(storageKey("scroll_left"), String(Math.max(0, pad + sceneX * nextZoom - (event.clientX - rect.left))));
-                sessionStorage.setItem(storageKey("scroll_top"), String(Math.max(0, pad + sceneY * nextZoom - (event.clientY - rect.top))));
+                localStorage.setItem(storageKey("zoom"), String(Number(nextZoom.toFixed(2))));
+                localStorage.setItem(storageKey("scroll_left"), String(Math.max(0, pad + sceneX * nextZoom - (event.clientX - rect.left))));
+                localStorage.setItem(storageKey("scroll_top"), String(Math.max(0, pad + sceneY * nextZoom - (event.clientY - rect.top))));
                 render(payload);
                 return;
               }
@@ -790,9 +818,9 @@
             }, { passive: false });
             viewport.addEventListener("dblclick", event => {
               if (event.target.closest(".node")) return;
-              sessionStorage.setItem(storageKey("zoom"), "1");
-              sessionStorage.removeItem(storageKey("scroll_left"));
-              sessionStorage.removeItem(storageKey("scroll_top"));
+              localStorage.setItem(storageKey("zoom"), "1");
+              localStorage.removeItem(storageKey("scroll_left"));
+              localStorage.removeItem(storageKey("scroll_top"));
               render(payload);
             });
           }
@@ -807,10 +835,6 @@
       window.addEventListener("message", event => {
         const message = event.data;
         if (!message || message.type !== "streamlit:render") return;
-        sessionStorage.removeItem(storageKey("auto_fit_done"));
-        sessionStorage.removeItem(storageKey("scroll_left"));
-        sessionStorage.removeItem(storageKey("scroll_top"));
-        sessionStorage.removeItem(storageKey("zoom"));
         render(message.args.payload || {});
       });
 

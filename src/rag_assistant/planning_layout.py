@@ -122,9 +122,25 @@ def save_planning_layout(path: Path, layout: dict) -> None:
 def ensure_layout(path: Path) -> dict:
     layout = load_planning_layout(path)
     layout = ensure_standard_weeks(layout)
+    layout = ensure_focus_block(layout)
     layout = normalize_layout_labels(layout)
     if not path.exists():
         save_planning_layout(path, layout)
+    return layout
+
+
+def ensure_focus_block(layout: dict) -> dict:
+    today_iso = date.today().isoformat()
+    for week in layout.get("weeks", []):
+        for day in week.get("days", []):
+            if day.get("date") != today_iso:
+                continue
+            blocks = day.setdefault("blocks", [])
+            has_focus = any((block.get("lane", "session") == "focus") for block in blocks)
+            if not has_focus:
+                day_key = day.get("key", f"day-{today_iso}")
+                blocks.insert(0, {"key": f"{day_key}-focus", "title": "Fő fókusz", "lane": "focus"})
+            return layout
     return layout
 
 

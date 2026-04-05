@@ -199,7 +199,7 @@ def sync_hierarchy_renames(records: list[KnowledgeRecord], previous_lookup: dict
 
 
 def planning_bucket_titles(layout: dict) -> dict[str, str]:
-    titles = {"": "Nincs utemezve"}
+    titles = {"": "Nincs utemezve", "main_focus": "Fő fókusz most"}
     for bucket in iter_buckets(layout):
         week_title = bucket.get("week_title", "").strip()
         day_title = bucket.get("day_title", "").strip()
@@ -209,7 +209,7 @@ def planning_bucket_titles(layout: dict) -> dict[str, str]:
 
 
 def planning_bucket_options(layout: dict, extra_values: list[str] | None = None) -> list[str]:
-    options = [""]
+    options = ["", "main_focus"]
     options.extend(bucket.get("key", "") for bucket in iter_buckets(layout) if bucket.get("key"))
     for value in extra_values or []:
         if value and value not in options:
@@ -390,6 +390,12 @@ def build_execution_sections(layout: dict) -> list[dict]:
     if today_day:
         focus_day = clone_day(today_day, title="Fő fókusz most", include_lanes={"focus"}, key_suffix="focus")
         if focus_day:
+            for block in focus_day.get("blocks", []):
+                if block.get("lane") == "focus":
+                    original_key = block.get("key", "")
+                    block["alias_keys"] = [key for key in [original_key, "main_focus"] if key]
+                    block["drop_target_key"] = "main_focus"
+                    block["key"] = "main_focus"
             main_focus_group_days.append(focus_day)
         main_day = clone_day(today_day, title="Ma", exclude_lanes={"focus"}, key_suffix="today")
         if main_day:
@@ -1211,7 +1217,7 @@ def expand_context_graph_with_ancestors(records: list[KnowledgeRecord], base_rec
     return list(selected.values())
 
 
-def build_context_graph_payload(records: list[KnowledgeRecord], selected_node_id: str, show_relations: bool, show_only_hierarchy: bool, mode: str) -> dict:
+def build_context_graph_payload(records: list[KnowledgeRecord], selected_node_id: str, show_relations: bool, show_only_hierarchy: bool, mode: str, force_fit_token: str = "") -> dict:
     filtered_lookup = {record.record_id: record for record in records}
     hierarchy_lookup: dict[str, str] = {}
     nodes: dict[str, dict] = {}
@@ -1328,6 +1334,7 @@ def build_context_graph_payload(records: list[KnowledgeRecord], selected_node_id
     return {
         "mode": mode,
         "selected_node_id": selected_node_id,
+        "force_fit_token": force_fit_token,
         "nodes": list(nodes.values()),
         "edges": [edge for edge in edges if not show_only_hierarchy or edge["kind"] == "hierarchy"],
     }
@@ -1501,8 +1508,53 @@ def render_execution_graph(records: list[KnowledgeRecord], layout: dict, layout_
     st.caption("Vizuális, drag-and-drop planning felület hét -> nap -> blokk szerkezettel. A blokkhoz tartozó nap dátuma a task `due` mezőjével kerül összhangba, a `deadline` ettől független marad.")
     render_execution_layout_manager(layout, layout_path)
 
+    with st.expander("Szűrés", expanded=False):
+        filter_col1, filter_col2, filter_col3, filter_col4 = st.columns(4)
+        exec_project = filter_col1.text_input("Projekt", key="execution_filter_project")
+        exec_org = filter_col2.text_input("Munkahely / organization", key="execution_filter_org")
+        exec_status = filter_col3.selectbox("Státusz", [NONE_OPTION] + STATUS_OPTIONS, key="execution_filter_status")
+        exec_bucket = filter_col4.selectbox(
+            "Tervezési hely",
+            [NONE_OPTION] + planning_bucket_options(layout),
+            format_func=lambda value: NONE_OPTION if value == NONE_OPTION else planning_bucket_label(value, planning_bucket_titles(layout)),
+            key="execution_filter_bucket",
+        )
+        filter_col5, filter_col6, filter_col7 = st.columns(3)
+        exec_due_from = filter_col5.date_input("Due - tól", value=st.session_state.get("execution_filter_due_from"), key="execution_filter_due_from")
+        exec_due_to = filter_col6.date_input("Due - ig", value=st.session_state.get("execution_filter_due_to"), key="execution_filter_due_to")
+        exec_text = filter_col7.text_input("Szöveges szűrés", key="execution_filter_text")
+
     task_records = [record for record in records if record.entity_type == "task"]
-    if not task_records:
+    filtered_task_records = task_records
+    if exec_project.strip():
+        needle = exec_project.strip().lower()
+        filtered_task_records = [record for record in filtered_task_records if needle in record.project.lower()]
+    if exec_org.strip():
+        needle = exec_org.strip().lower()
+        filtered_task_records = [record for record in filtered_task_records if needle in record.organization.lower()]
+    if exec_status != NONE_OPTION:
+        filtered_task_records = [record for record in filtered_task_records if record.status == exec_status]
+    if exec_bucket != NONE_OPTION:
+        filtered_task_records = [record for record in filtered_task_records if record.planning_bucket == exec_bucket]
+    if exec_due_from:
+        due_from_iso = exec_due_from.isoformat()
+        filtered_task_records = [record for record in filtered_task_records if record.due_at and record.due_at >= due_from_iso]
+    if exec_due_to:
+        due_to_iso = exec_due_to.isoformat()
+        filtered_task_records = [record for record in filtered_task_records if record.due_at and record.due_at <= due_to_iso]
+    if exec_text.strip():
+        needle = exec_text.strip().lower()
+        filtered_task_records = [
+            record
+            for record in filtered_task_records
+            if needle in record.title.lower()
+            or needle in record.summary.lower()
+            or needle in record.project.lower()
+            or needle in record.case_name.lower()
+            or needle in record.next_step.lower()
+        ]
+
+    if not filtered_task_records:
         st.info("Meg nincs task rekord az execution graphhoz.")
         return
 
@@ -1517,7 +1569,7 @@ def render_execution_graph(records: list[KnowledgeRecord], layout: dict, layout_
                 "planning_bucket": record.planning_bucket,
                 "focus_rank": record.focus_rank,
             }
-            for record in task_records
+            for record in filtered_task_records
         ],
     }
 
@@ -1535,7 +1587,7 @@ def render_execution_graph(records: list[KnowledgeRecord], layout: dict, layout_
         normalized_bucket = "" if planning_bucket == "__unscheduled__" else planning_bucket
         if dragged_record and normalized_bucket != dragged_record.planning_bucket:
             bucket_info = day_for_bucket(layout, normalized_bucket) if normalized_bucket else None
-            next_due = bucket_info.get("day_date") if bucket_info else None
+            next_due = date.today().isoformat() if normalized_bucket == "main_focus" else (bucket_info.get("day_date") if bucket_info else None)
             persist_record(
                 update_record(
                     dragged_record,
@@ -1595,7 +1647,7 @@ def render_execution_graph(records: list[KnowledgeRecord], layout: dict, layout_
 
     st.divider()
     st.markdown("**Task history**")
-    valid_task_ids = [record.record_id for record in task_records]
+    valid_task_ids = [record.record_id for record in filtered_task_records]
     selected_execution_id = st.session_state.get("execution_selected_record_id")
     if selected_execution_id not in valid_task_ids and valid_task_ids:
         selected_execution_id = valid_task_ids[0]
@@ -1606,11 +1658,11 @@ def render_execution_graph(records: list[KnowledgeRecord], layout: dict, layout_
             "Task kiválasztása",
             options=valid_task_ids,
             index=valid_task_ids.index(selected_execution_id) if selected_execution_id in valid_task_ids else 0,
-            format_func=lambda record_id: record_label(next(record for record in task_records if record.record_id == record_id)),
+            format_func=lambda record_id: record_label(next(record for record in filtered_task_records if record.record_id == record_id)),
             key="execution_history_record_picker",
         )
         st.session_state["execution_selected_record_id"] = selected_execution_id
-        selected_task = next((record for record in task_records if record.record_id == selected_execution_id), None)
+        selected_task = next((record for record in filtered_task_records if record.record_id == selected_execution_id), None)
         if selected_task:
             action_col1, action_col2 = st.columns([1, 1])
             if action_col1.button("Részlet", key=f"execution_open_detail_{selected_task.record_id}"):
@@ -1646,15 +1698,14 @@ def inject_app_shell_css() -> None:
         """
         <style>
         .rag-topline {
-          position: sticky; top: 0; z-index: 1000;
-          background: rgba(255,255,255,0.96); backdrop-filter: blur(8px);
+          background: rgba(255,255,255,0.96);
           padding: 6px 0 10px 0; margin-bottom: 2px;
           font-size: 0.98rem; font-weight: 600; color: #334155; white-space: nowrap; overflow-x: auto;
         }
-        div[data-testid="stTabs"] > div:first-child {
-          position: sticky; top: 34px; z-index: 999; background: rgba(255,255,255,0.97); padding-top: 4px;
+        div[data-testid="stTabs"] [data-baseweb="tab-list"] {
+          display: flex !important;
         }
-        div[data-testid="stTabs"] button[role="tab"] {
+        button[role="tab"] {
           font-size: 0.95rem;
         }
         </style>
@@ -1665,6 +1716,64 @@ def inject_app_shell_css() -> None:
 
 def render_app_topline() -> None:
     st.markdown('<div class="rag-topline">RAG asszisztens - domain-modellre épülő személyes tudás- és ügykezelő rendszer a privát RAG-DB fölött.</div>', unsafe_allow_html=True)
+
+
+def inject_tab_bar_behavior() -> None:
+    target_tab = st.session_state.pop("pending_main_tab", "")
+    components.html(
+        f"""
+        <script>
+        const target = {target_tab!r};
+        const doc = window.parent.document;
+        function syncStickyHeader() {{
+          const topLine = doc.querySelector(".rag-topline");
+          const tabsRoot = doc.querySelector('div[data-testid="stTabs"]');
+          const tabList = tabsRoot ? (tabsRoot.querySelector('[data-baseweb="tab-list"]') || tabsRoot.querySelector('div[role="tablist"]')) : null;
+          const tabButtons = Array.from(doc.querySelectorAll('button[role="tab"]'));
+          if (!topLine || !tabsRoot || !tabList || !tabButtons.length) return false;
+
+          topLine.style.position = "fixed";
+          topLine.style.top = "0";
+          topLine.style.left = "0";
+          topLine.style.right = "0";
+          topLine.style.zIndex = "1002";
+          topLine.style.margin = "0";
+          topLine.style.padding = "6px 14px 8px 14px";
+          topLine.style.background = "rgba(255,255,255,0.98)";
+          topLine.style.borderBottom = "1px solid #e5e7eb";
+
+          tabList.style.position = "fixed";
+          tabList.style.top = `${{topLine.offsetHeight}}px`;
+          tabList.style.left = "0";
+          tabList.style.right = "0";
+          tabList.style.zIndex = "1001";
+          tabList.style.margin = "0";
+          tabList.style.padding = "6px 14px 8px 14px";
+          tabList.style.background = "rgba(255,255,255,0.98)";
+          tabList.style.borderBottom = "1px solid #e5e7eb";
+
+          const panelWrap = tabsRoot.querySelector(':scope > div:nth-child(2)');
+          if (panelWrap) {{
+            panelWrap.style.marginTop = `${{topLine.offsetHeight + tabList.offsetHeight + 8}}px`;
+          }}
+
+          if (target) {{
+            const match = tabButtons.find(button => (button.innerText || "").trim() === target);
+            if (match) match.click();
+          }}
+          return true;
+        }};
+        let attempts = 0;
+        const timer = setInterval(() => {{
+          attempts += 1;
+          if (syncStickyHeader() || attempts > 50) {{
+            clearInterval(timer);
+          }}
+        }}, 120);
+        </script>
+        """,
+        height=0,
+    )
 
 
 def app() -> None:
@@ -1705,9 +1814,10 @@ def app() -> None:
         st.sidebar.write(record_label(selected_record))
         st.sidebar.caption(selected_record.record_id)
 
-    tab_execution, tab_detail, tab_input, tab_table, tab_kanban, tab_timeline, tab_mindmap, tab_search = st.tabs(
-        ["Execution Graph", "Részlet", "Bevitel", "Táblázat", "Kanban", "Timeline", "Context Graph", "Keresés"]
+    tab_execution, tab_mindmap, tab_kanban, tab_detail, tab_input, tab_table, tab_timeline, tab_search = st.tabs(
+        ["Execution Graph", "Context Graph", "Kanban", "Részlet", "Bevitel", "Táblázat", "Timeline", "Keresés"]
     )
+    inject_tab_bar_behavior()
 
     with tab_input:
         st.subheader("Kezi upsert")
@@ -2023,30 +2133,67 @@ def app() -> None:
     with tab_kanban:
         st.subheader("Kanban nezet")
         st.caption("Drag-and-drop statuszvaltas task, case es project rekordokra. Az `inbox` itt `Backlog` neven jelenik meg.")
+        with st.expander("Szűrés", expanded=False):
+            filter_col1, filter_col2, filter_col3, filter_col4 = st.columns(4)
+            kanban_project = filter_col1.text_input("Projekt", key="kanban_filter_project")
+            kanban_org = filter_col2.text_input("Munkahely / organization", key="kanban_filter_org")
+            kanban_status = filter_col3.selectbox("Státusz", [NONE_OPTION] + STATUS_OPTIONS, key="kanban_filter_status")
+            kanban_entity = filter_col4.selectbox("Entitás", [NONE_OPTION, "task", "case", "project"], key="kanban_filter_entity")
+            filter_col5, filter_col6, filter_col7 = st.columns(3)
+            kanban_due_from = filter_col5.date_input("Due - tól", value=st.session_state.get("kanban_filter_due_from"), key="kanban_filter_due_from")
+            kanban_due_to = filter_col6.date_input("Due - ig", value=st.session_state.get("kanban_filter_due_to"), key="kanban_filter_due_to")
+            kanban_text = filter_col7.text_input("Szöveges szűrés", key="kanban_filter_text")
+
         task_like = [record for record in records if record.entity_type in {"task", "case", "project"}]
-        kanban_payload = {
-            "statuses": [{"key": status, "title": STATUS_LABELS.get(status, status)} for status in STATUS_OPTIONS],
-            "items": [
-                {
-                    "record_id": record.record_id,
-                    "title": record.title,
-                    "status": record.status,
-                    "entity_type": record.entity_type,
-                    "project": record.project,
-                }
-                for record in task_like
-            ],
-        }
-        kanban_result = kanban_dnd_board(kanban_payload, key="kanban_dnd_surface")
-        if isinstance(kanban_result, dict) and kanban_result.get("action") == "move_status":
-            event_id = str(kanban_result.get("event_id", "")).strip()
-            if event_id and st.session_state.get("last_kanban_drag_event") != event_id:
-                st.session_state["last_kanban_drag_event"] = event_id
-                record_id = str(kanban_result.get("record_id", "")).strip()
-                new_status = str(kanban_result.get("status", "")).strip()
-                moved_record = next((record for record in task_like if record.record_id == record_id), None)
-                if moved_record and new_status and new_status != moved_record.status:
-                    persist_record(update_record(moved_record, status=new_status), source_dir, config, records_path, index_path, chroma_dir, history_events_path)
+        if kanban_project.strip():
+            needle = kanban_project.strip().lower()
+            task_like = [record for record in task_like if needle in record.project.lower()]
+        if kanban_org.strip():
+            needle = kanban_org.strip().lower()
+            task_like = [record for record in task_like if needle in record.organization.lower()]
+        if kanban_status != NONE_OPTION:
+            task_like = [record for record in task_like if record.status == kanban_status]
+        if kanban_entity != NONE_OPTION:
+            task_like = [record for record in task_like if record.entity_type == kanban_entity]
+        if kanban_due_from:
+            due_from_iso = kanban_due_from.isoformat()
+            task_like = [record for record in task_like if record.due_at and record.due_at >= due_from_iso]
+        if kanban_due_to:
+            due_to_iso = kanban_due_to.isoformat()
+            task_like = [record for record in task_like if record.due_at and record.due_at <= due_to_iso]
+        if kanban_text.strip():
+            needle = kanban_text.strip().lower()
+            task_like = [
+                record for record in task_like
+                if needle in record.title.lower() or needle in record.summary.lower() or needle in record.case_name.lower()
+            ]
+
+        if not task_like:
+            st.info("A jelenlegi szűrőkkel nincs megjeleníthető kanban elem.")
+        else:
+            kanban_payload = {
+                "statuses": [{"key": status, "title": STATUS_LABELS.get(status, status)} for status in STATUS_OPTIONS],
+                "items": [
+                    {
+                        "record_id": record.record_id,
+                        "title": record.title,
+                        "status": record.status,
+                        "entity_type": record.entity_type,
+                        "project": record.project,
+                    }
+                    for record in task_like
+                ],
+            }
+            kanban_result = kanban_dnd_board(kanban_payload, key="kanban_dnd_surface")
+            if isinstance(kanban_result, dict) and kanban_result.get("action") == "move_status":
+                event_id = str(kanban_result.get("event_id", "")).strip()
+                if event_id and st.session_state.get("last_kanban_drag_event") != event_id:
+                    st.session_state["last_kanban_drag_event"] = event_id
+                    record_id = str(kanban_result.get("record_id", "")).strip()
+                    new_status = str(kanban_result.get("status", "")).strip()
+                    moved_record = next((record for record in task_like if record.record_id == record_id), None)
+                    if moved_record and new_status and new_status != moved_record.status:
+                        persist_record(update_record(moved_record, status=new_status), source_dir, config, records_path, index_path, chroma_dir, history_events_path)
 
     with tab_timeline:
         st.subheader("Timeline nezet")
@@ -2122,37 +2269,37 @@ def app() -> None:
                 """,
                 unsafe_allow_html=True,
             )
+            with st.expander("Szűrés", expanded=False):
+                filter_col1, filter_col2, filter_col3 = st.columns(3)
+                filter_entities = filter_col1.multiselect(
+                    "Entitas szures",
+                    options=ENTITY_OPTIONS,
+                    default=st.session_state.get("context_graph_entities", []),
+                    key="context_graph_entities",
+                )
+                filter_statuses = filter_col2.multiselect(
+                    "Statusz szures",
+                    options=STATUS_OPTIONS,
+                    default=st.session_state.get("context_graph_statuses", []),
+                    key="context_graph_statuses",
+                )
+                active_only = filter_col3.checkbox("Csak aktivak", value=st.session_state.get("context_graph_active_only", True), key="context_graph_active_only")
 
-            filter_col1, filter_col2, filter_col3 = st.columns(3)
-            filter_entities = filter_col1.multiselect(
-                "Entitas szures",
-                options=ENTITY_OPTIONS,
-                default=st.session_state.get("context_graph_entities", []),
-                key="context_graph_entities",
-            )
-            filter_statuses = filter_col2.multiselect(
-                "Statusz szures",
-                options=STATUS_OPTIONS,
-                default=st.session_state.get("context_graph_statuses", []),
-                key="context_graph_statuses",
-            )
-            active_only = filter_col3.checkbox("Csak aktivak", value=st.session_state.get("context_graph_active_only", True), key="context_graph_active_only")
+                filter_col4, filter_col5, filter_col6, filter_col7 = st.columns(4)
+                context_project = filter_col4.text_input("Projekt szures", key="context_graph_project")
+                context_case = filter_col5.text_input("Ugy szures", key="context_graph_case")
+                context_due_from = filter_col6.date_input("Due - tol", value=st.session_state.get("context_graph_due_from"), key="context_graph_due_from")
+                context_due_to = filter_col7.date_input("Due - ig", value=st.session_state.get("context_graph_due_to"), key="context_graph_due_to")
 
-            filter_col4, filter_col5, filter_col6, filter_col7 = st.columns(4)
-            context_project = filter_col4.text_input("Projekt szures", key="context_graph_project")
-            context_case = filter_col5.text_input("Ugy szures", key="context_graph_case")
-            context_due_from = filter_col6.date_input("Due - tol", value=st.session_state.get("context_graph_due_from"), key="context_graph_due_from")
-            context_due_to = filter_col7.date_input("Due - ig", value=st.session_state.get("context_graph_due_to"), key="context_graph_due_to")
-
-            toggle_col1, toggle_col2 = st.columns(2)
-            show_relations = toggle_col1.checkbox("Relaciok mutatasa", value=st.session_state.get("context_graph_show_relations", True), key="context_graph_show_relations")
-            show_only_hierarchy = toggle_col2.checkbox("Csak hierarchia", value=st.session_state.get("context_graph_only_hierarchy", False), key="context_graph_only_hierarchy")
-            graph_mode = st.selectbox(
-                "Nezet",
-                options=["branch_right", "radial"],
-                format_func=lambda value: {"branch_right": "Jobb fele agszerkezet", "radial": "Radial"}.get(value, value),
-                key="context_graph_mode",
-            )
+                toggle_col1, toggle_col2 = st.columns(2)
+                show_relations = toggle_col1.checkbox("Relaciok mutatasa", value=st.session_state.get("context_graph_show_relations", True), key="context_graph_show_relations")
+                show_only_hierarchy = toggle_col2.checkbox("Csak hierarchia", value=st.session_state.get("context_graph_only_hierarchy", False), key="context_graph_only_hierarchy")
+                graph_mode = st.selectbox(
+                    "Nezet",
+                    options=["branch_right", "radial"],
+                    format_func=lambda value: {"branch_right": "Jobb fele agszerkezet", "radial": "Radial"}.get(value, value),
+                    key="context_graph_mode",
+                )
 
             filtered_graph_records = filter_context_graph_records(
                 records,
@@ -2175,9 +2322,10 @@ def app() -> None:
                     selected_record_id = filtered_graph_records[0].record_id
                     st.session_state["context_graph_selected_record_id"] = selected_record_id
 
+                panel_height = 700
                 graph_col, editor_col = st.columns([2.2, 1.1])
                 with graph_col:
-                    graph_box = st.container(height=860, border=False)
+                    graph_box = st.container(height=panel_height, border=True)
                     with graph_box:
                         graph_payload = build_context_graph_payload(
                             visible_graph_records,
@@ -2185,6 +2333,7 @@ def app() -> None:
                             show_relations,
                             show_only_hierarchy,
                             graph_mode,
+                            st.session_state.get("context_graph_force_fit_token", ""),
                         )
                         graph_result = context_graph(graph_payload, key="context_graph_surface")
                         if isinstance(graph_result, dict) and graph_result.get("action") in {"select_node", "reparent_node"}:
@@ -2223,7 +2372,7 @@ def app() -> None:
 
                 with editor_col:
                     selected_record = next((record for record in records if record.record_id == st.session_state.get("context_graph_selected_record_id")), None)
-                    editor_box = st.container(height=860, border=False)
+                    editor_box = st.container(height=panel_height, border=True)
                     with editor_box:
                         if selected_record is None:
                             st.info("Valassz ki egy rekordot a grafon.")
@@ -2384,13 +2533,14 @@ def app() -> None:
 
     with tab_search:
         st.subheader("Kereses")
-        query = st.text_input("Kerdes vagy kulcsszo")
+        query = st.text_input("Kerdes vagy kulcsszo", key="search_query")
         if st.button("Kereses inditasa"):
             chunks = load_index(index_path)
-            results = search_chunks(chunks, query, limit=10)
-            if not results:
-                st.info("Nincs talalat.")
-            for score, chunk in results:
+            st.session_state["search_results"] = search_chunks(chunks, query, limit=10)
+        results = st.session_state.get("search_results", [])
+        if not results and query:
+            st.info("Nincs talalat.")
+        for score, chunk in results:
                 st.markdown(f"**{chunk.title}**  `score={score:.3f}`")
                 st.caption(
                     f"forras: {chunk.source_path} | tipus: {chunk.source_type} | entitas: {chunk.entity_type}"
@@ -2401,9 +2551,25 @@ def app() -> None:
                 st.write(chunk.text)
                 if chunk.tags:
                     st.caption("tagek: " + ", ".join(chunk.tags))
-                if chunk.record_id and st.button("Megnyit", key=f"open_search_{chunk.record_id}_{chunk.chunk_id}"):
-                    st.session_state["selected_record_id"] = chunk.record_id
-                    st.rerun()
+                if chunk.record_id:
+                    action_col1, action_col2, action_col3 = st.columns(3)
+                    if action_col1.button("Megnyit részletben", key=f"open_search_detail_{chunk.record_id}_{chunk.chunk_id}"):
+                        st.session_state["selected_record_id"] = chunk.record_id
+                        st.rerun()
+                    if action_col2.button("Kijelölés Context Graphban", key=f"open_search_context_{chunk.record_id}_{chunk.chunk_id}"):
+                        st.session_state["selected_record_id"] = chunk.record_id
+                        st.session_state["context_graph_selected_record_id"] = chunk.record_id
+                        st.session_state["context_graph_force_fit_token"] = utc_now_iso()
+                        st.session_state["pending_main_tab"] = "Context Graph"
+                        st.rerun()
+                    if action_col3.button("Kijelölés Executionben", key=f"open_search_execution_{chunk.record_id}_{chunk.chunk_id}"):
+                        st.session_state["selected_record_id"] = chunk.record_id
+                        st.session_state["execution_selected_record_id"] = chunk.record_id
+                        matching_record = next((record for record in records if record.record_id == chunk.record_id), None)
+                        if matching_record and matching_record.planning_bucket:
+                            st.session_state["execution_filter_bucket"] = matching_record.planning_bucket
+                        st.session_state["pending_main_tab"] = "Execution Graph"
+                        st.rerun()
                 st.divider()
 
 
