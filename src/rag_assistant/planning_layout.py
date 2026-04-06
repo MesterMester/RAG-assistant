@@ -131,16 +131,25 @@ def ensure_layout(path: Path) -> dict:
 
 def ensure_focus_block(layout: dict) -> dict:
     today_iso = date.today().isoformat()
+    found_today = False
     for week in layout.get("weeks", []):
         for day in week.get("days", []):
-            if day.get("date") != today_iso:
-                continue
             blocks = day.setdefault("blocks", [])
-            has_focus = any((block.get("lane", "session") == "focus") for block in blocks)
-            if not has_focus:
-                day_key = day.get("key", f"day-{today_iso}")
-                blocks.insert(0, {"key": f"{day_key}-focus", "title": "Fő fókusz", "lane": "focus"})
-            return layout
+            if day.get("date") == today_iso:
+                found_today = True
+                has_focus = any((block.get("lane", "session") == "focus") for block in blocks)
+                if not has_focus:
+                    day_key = day.get("key", f"day-{today_iso}")
+                    blocks.insert(0, {"key": f"{day_key}-focus", "title": "Fő fókusz", "lane": "focus"})
+            else:
+                day["blocks"] = [block for block in blocks if block.get("lane", "session") != "focus"]
+    if not found_today:
+        for week in layout.get("weeks", []):
+            for day in week.get("days", []):
+                if day.get("date") == today_iso:
+                    day_key = day.get("key", f"day-{today_iso}")
+                    day.setdefault("blocks", []).insert(0, {"key": f"{day_key}-focus", "title": "Fő fókusz", "lane": "focus"})
+                    return layout
     return layout
 
 

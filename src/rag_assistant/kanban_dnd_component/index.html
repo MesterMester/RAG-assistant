@@ -4,12 +4,13 @@
     <meta charset="UTF-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
     <style>
-      body { margin: 0; padding: 12px; font-family: Georgia, "Times New Roman", serif; background: linear-gradient(180deg,#fffefb,#f8fafc); overflow-x: auto; }
-      .board-wrap { overflow-x: auto; padding-bottom: 8px; }
+      html, body { height: 100%; }
+      body { margin: 0; padding: 12px; font-family: Georgia, "Times New Roman", serif; background: linear-gradient(180deg,#fffefb,#f8fafc); overflow: hidden; }
+      .board-wrap { overflow: auto; padding-bottom: 8px; max-height: calc(100vh - 24px); }
       .board { display: grid; grid-template-columns: repeat(7, minmax(180px, 1fr)) 160px; gap: 12px; min-width: 1520px; }
-      .col { border: 1px solid #e2e8f0; border-radius: 18px; background: rgba(255,255,255,0.88); min-height: 280px; padding: 10px; }
+      .col { border: 1px solid #e2e8f0; border-radius: 18px; background: rgba(255,255,255,0.88); min-height: 280px; max-height: calc(100vh - 72px); padding: 10px; overflow-y: auto; position: relative; }
       .col.drag-over { border-color: #0f172a; background: #fff7ed; }
-      .head { font-weight: 700; margin-bottom: 10px; position: sticky; top: 0; background: rgba(255,255,255,0.95); z-index: 5; padding-bottom: 4px; }
+      .head { font-weight: 700; margin: -10px -10px 10px -10px; position: sticky; top: -10px; background: rgba(255,255,255,0.98); z-index: 5; padding: 10px 10px 8px 10px; border-bottom: 1px solid #e2e8f0; }
       .card { background: white; border-left: 4px solid #334155; border-radius: 14px; padding: 10px 12px; box-shadow: 0 4px 14px rgba(15,23,42,0.08); margin-bottom: 8px; cursor: grab; }
       .card.dragging { opacity: 0.45; }
       .meta { color: #64748b; font-size: 12px; margin-top: 2px; }

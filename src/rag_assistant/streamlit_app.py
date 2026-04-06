@@ -41,6 +41,14 @@ from rag_assistant.planning_layout import (
 )
 from rag_assistant.records import build_record_id, delete_record, load_records, normalize_records, replace_records, save_records, upsert_record
 from rag_assistant.search import search_chunks
+from rag_assistant.thunderbird_importer import (
+    ThunderbirdMailboxInventory,
+    ThunderbirdMessagePreview,
+    discover_mailboxes,
+    load_thunderbird_import_config,
+    preview_messages,
+    thunderbird_preview_rows,
+)
 from rag_assistant.vector_store import VectorStoreError, upsert_manual_records
 
 STATUS_OPTIONS = ["inbox", "next", "active", "waiting", "done", "cancelled", "archived"]
@@ -124,6 +132,37 @@ def export_filename_suggestion(records: list[KnowledgeRecord]) -> str:
     if len(records) > 3:
         base += f"-plus-{len(records)-3}"
     return f"{base}-{date.today().isoformat()}.md"
+
+
+def thunderbird_record_id(preview: ThunderbirdMessagePreview) -> str:
+    stable_source = preview.message_id or f"{preview.mailbox_path}|{preview.sent_at}|{preview.subject}"
+    digest = re.sub(r"[^a-z0-9]+", "-", stable_source.lower()).strip("-")[:48]
+    digest = digest or "mail"
+    return f"tb-mail-{digest}"
+
+
+def thunderbird_preview_to_record(preview: ThunderbirdMessagePreview) -> KnowledgeRecord:
+    sent_label = preview.sent_at[:10] if preview.sent_at else ""
+    summary_bits = [bit for bit in [preview.sender, sent_label, preview.mailbox_name] if bit]
+    content_lines = [
+        f"from: {preview.sender}" if preview.sender else "",
+        f"to: {preview.recipients}" if preview.recipients else "",
+        f"date: {preview.sent_at}" if preview.sent_at else "",
+        f"message-id: {preview.message_id}" if preview.message_id else "",
+        f"mailbox: {preview.mailbox_path}",
+        "",
+        preview.body_full or preview.body_preview,
+    ]
+    return KnowledgeRecord(
+        record_id=thunderbird_record_id(preview),
+        title=preview.subject or "(tárgy nélkül)",
+        summary=" | ".join(summary_bits),
+        content="\n".join(line for line in content_lines if line is not None).strip(),
+        source_type="thunderbird_email",
+        entity_type="source_item",
+        status="inbox",
+        tags=["email", "thunderbird"],
+    )
 
 
 def record_label(record: KnowledgeRecord) -> str:
@@ -967,6 +1006,49 @@ def parse_optional_date(value: str | None) -> date | None:
     return date.fromisoformat(value)
 
 
+def archive_metadata(events: list[dict], record_id: str) -> tuple[str, str]:
+    for event in reversed(events):
+        if event.get("record_id") != record_id:
+            continue
+        before = event.get("before") or {}
+        after = event.get("after") or {}
+        if after.get("status") == "archived":
+            return str(event.get("timestamp", "")), str(before.get("status", ""))
+    return "", ""
+
+
+def apply_history_snapshot(events: list[dict], selected_event_ids: list[str], records: list[KnowledgeRecord]) -> list[KnowledgeRecord]:
+    record_lookup = {record.record_id: record for record in records}
+    for event in events:
+        if event.get("event_id") not in selected_event_ids:
+            continue
+        record_id = event.get("record_id")
+        before = event.get("before")
+        if record_id == "__export__":
+            continue
+        if before is None:
+            record_lookup.pop(record_id, None)
+        else:
+            record_lookup[record_id] = KnowledgeRecord.from_dict(before)
+    return list(record_lookup.values())
+
+
+def apply_history_future(events: list[dict], selected_event_ids: list[str], records: list[KnowledgeRecord]) -> list[KnowledgeRecord]:
+    record_lookup = {record.record_id: record for record in records}
+    for event in events:
+        if event.get("event_id") not in selected_event_ids:
+            continue
+        record_id = event.get("record_id")
+        after = event.get("after")
+        if record_id == "__export__":
+            continue
+        if after is None:
+            record_lookup.pop(record_id, None)
+        else:
+            record_lookup[record_id] = KnowledgeRecord.from_dict(after)
+    return list(record_lookup.values())
+
+
 def persist_record(record: KnowledgeRecord, source_dir, config, records_path, index_path, chroma_dir, history_path) -> None:
     saved = upsert_record(records_path, record, history_path=history_path, source="ui")
     st.session_state["selected_record_id"] = saved.record_id
@@ -1272,10 +1354,9 @@ def render_markdown_obsidian(records: list[KnowledgeRecord], all_records: list[K
         estimate_prefix = minutes_to_keycap(estimate_minutes)
         icons, abbreviations = lineage_prefix(record)
         title = f"{record.title} – {record.next_step}" if record.next_step else record.title
-        prefix_head = f"{icons} {abbreviations}: ".strip()
-        if prefix_head.endswith(":") and not title:
-            prefix_head = prefix_head[:-1]
-        body = f"{prefix_head}{title}".strip()
+        prefix_bits = [bit for bit in [icons, abbreviations] if bit]
+        prefix_head = " ".join(prefix_bits)
+        body = f"{prefix_head}: {title}" if prefix_head else title
         if record.entity_type == "task":
             return ("- [x] " if record.status == "done" else "- [ ] ") + f"{estimate_prefix} | {body}"
         if record.entity_type == "event":
@@ -1348,6 +1429,18 @@ def persist_records_bulk(records: list[KnowledgeRecord], source_dir, config, rec
     except VectorStoreError as exc:
         st.warning(f"Chroma upsert kihagyva: {exc}")
     st.rerun()
+
+
+def persist_records_bulk_quiet(records: list[KnowledgeRecord], source_dir, config, records_path, index_path, chroma_dir, history_path) -> list[KnowledgeRecord]:
+    replace_records(records_path, records, history_path=history_path, source="ui")
+    refreshed_records = load_records(records_path)
+    chunks = build_index(source_dir, config)
+    save_index(index_path, chunks)
+    try:
+        upsert_manual_records(refreshed_records, chroma_dir, config.ollama_embed_model)
+    except VectorStoreError:
+        pass
+    return refreshed_records
 
 
 def record_from_table_row(row: dict, existing: KnowledgeRecord) -> KnowledgeRecord:
@@ -2024,6 +2117,7 @@ def filter_context_graph_records(
     status_filters: list[str],
     project_filter: str,
     case_filter: str,
+    text_filter: str,
     active_only: bool,
     due_from: date | None,
     due_to: date | None,
@@ -2039,6 +2133,20 @@ def filter_context_graph_records(
     if case_filter.strip():
         needle = case_filter.strip().lower()
         filtered = [record for record in filtered if needle in record.case_name.lower()]
+    if text_filter.strip():
+        needle = text_filter.strip().lower()
+        filtered = [
+            record
+            for record in filtered
+            if needle in record.title.lower()
+            or needle in record.summary.lower()
+            or needle in record.content.lower()
+            or needle in record.organization.lower()
+            or needle in record.team.lower()
+            or needle in record.project.lower()
+            or needle in record.case_name.lower()
+            or needle in record.next_step.lower()
+        ]
     if active_only:
         filtered = [record for record in filtered if record.status in {"inbox", "next", "active", "waiting"}]
     if due_from:
@@ -2094,6 +2202,7 @@ def build_context_graph_payload(records: list[KnowledgeRecord], selected_node_id
             "synthetic": synthetic,
             "export_selected": node_id in export_selected,
             "icon": "" if synthetic or not record else record.icon,
+            "has_note": False if synthetic or not record else bool(record.content.strip()),
         }
 
     def add_edge(source: str, target: str, kind: str, relation_type: str = "", label: str = "") -> None:
@@ -2599,11 +2708,27 @@ def render_record_history(history_path, record_id: str, key_prefix: str = "histo
 
 
 def render_global_history(history_path, records: list[KnowledgeRecord], records_path, source_dir, config, index_path, chroma_dir) -> None:
-    events = list(reversed(load_events(history_path)))
+    raw_events = load_events(history_path)
+    events = list(reversed(raw_events))
     if not events:
         st.info("Még nincs history esemény.")
         return
     st.markdown("**Globális history**")
+    actionable_events = [event for event in events if event.get("record_id") != "__export__"]
+    action_col1, action_col2 = st.columns(2)
+    if action_col1.button("Undo utolsó lépés", key="global_history_undo_last") and actionable_events:
+        latest_event = actionable_events[0]
+        updated_records = apply_history_snapshot(raw_events, [str(latest_event.get("event_id", ""))], records)
+        redo_stack = list(st.session_state.get("history_redo_stack", []))
+        redo_stack.append(latest_event)
+        st.session_state["history_redo_stack"] = redo_stack[-20:]
+        persist_records_bulk(updated_records, source_dir, config, records_path, index_path, chroma_dir, history_path, "Utolsó lépés visszavonva.")
+    redo_stack = list(st.session_state.get("history_redo_stack", []))
+    if action_col2.button("Redo", key="global_history_redo_last", disabled=not redo_stack):
+        redo_event = redo_stack.pop()
+        st.session_state["history_redo_stack"] = redo_stack
+        updated_records = apply_history_future(raw_events, [str(redo_event.get("event_id", ""))], records)
+        persist_records_bulk(updated_records, source_dir, config, records_path, index_path, chroma_dir, history_path, "Utolsó lépés visszaállítva.")
     selected_event_ids: list[str] = []
     for event in events[:80]:
         event_id = str(event.get("event_id", ""))
@@ -2611,19 +2736,8 @@ def render_global_history(history_path, records: list[KnowledgeRecord], records_
         if st.checkbox(label, key=f"global_history_{event_id}"):
             selected_event_ids.append(event_id)
     if selected_event_ids and st.button("Kijelölt események visszavonása", key="global_history_undo"):
-        record_lookup = {record.record_id: record for record in records}
-        for event in events:
-            if event.get("event_id") not in selected_event_ids:
-                continue
-            record_id = event.get("record_id")
-            before = event.get("before")
-            if record_id == "__export__":
-                continue
-            if before is None:
-                record_lookup.pop(record_id, None)
-            else:
-                record_lookup[record_id] = KnowledgeRecord.from_dict(before)
-        persist_records_bulk(list(record_lookup.values()), source_dir, config, records_path, index_path, chroma_dir, history_path, "Kijelölt history események visszavonva.")
+        updated_records = apply_history_snapshot(raw_events, selected_event_ids, records)
+        persist_records_bulk(updated_records, source_dir, config, records_path, index_path, chroma_dir, history_path, "Kijelölt history események visszavonva.")
 
 
 def inject_app_shell_css() -> None:
@@ -2733,10 +2847,22 @@ def app() -> None:
     records, normalized_count = normalize_records(records)
     if normalized_count:
         save_records(records_path, records)
+    today_iso = date.today().isoformat()
+    refreshed_main_focus = [
+        update_record(record, due_at=today_iso, updated_at=utc_now_iso())
+        if record.planning_bucket == "main_focus" and record.status != "archived" and record.due_at != today_iso
+        else record
+        for record in records
+    ]
+    if any(before.to_dict() != after.to_dict() for before, after in zip(records, refreshed_main_focus)):
+        records = persist_records_bulk_quiet(refreshed_main_focus, source_dir, config, records_path, index_path, chroma_dir, history_events_path)
     existing_values = collect_existing_values(records)
     selected_record = get_selected_record(records)
     planning_options = planning_bucket_options(planning_layout, [record.planning_bucket for record in records])
     export_selected_ids = load_export_selection(export_selection_path)
+    if not st.session_state.get("_context_graph_filter_migrated"):
+        st.session_state["context_graph_active_only"] = False
+        st.session_state["_context_graph_filter_migrated"] = True
 
     st.sidebar.subheader("Privat tarak")
     st.sidebar.write(f"RAG-DB: `{source_dir}`")
@@ -2745,13 +2871,14 @@ def app() -> None:
     st.sidebar.write(f"Chroma: `{chroma_dir}`")
     st.sidebar.write(f"Planning layout: `{planning_layout_path}`")
     st.sidebar.write(f"History log: `{history_events_path}`")
+    st.sidebar.write(f"Thunderbird import MD: `{config.thunderbird_import_md or '-'}`")
     if selected_record:
         st.sidebar.subheader("Kivalasztott rekord")
         st.sidebar.write(record_label(selected_record))
         st.sidebar.caption(selected_record.record_id)
 
-    tab_execution, tab_mindmap, tab_kanban, tab_timeline, tab_archive, tab_detail, tab_input, tab_table, tab_export, tab_search = st.tabs(
-        ["Execution Graph", "Context Graph", "Kanban", "GANTT", "Archívum", "Részlet", "Bevitel", "Táblázat", "MD Export", "Keresés"]
+    tab_execution, tab_mindmap, tab_kanban, tab_timeline, tab_archive, tab_history, tab_detail, tab_input, tab_table, tab_export, tab_thunderbird, tab_search = st.tabs(
+        ["Execution Graph", "Context Graph", "Kanban", "GANTT", "Archívum", "History", "Részlet", "Bevitel", "Táblázat", "MD Export", "Thunderbird", "Keresés"]
     )
     inject_tab_bar_behavior()
 
@@ -2869,14 +2996,16 @@ def app() -> None:
         if records:
             filter_col1, filter_col2, filter_col3, filter_col4 = st.columns(4)
             filter_title = filter_col1.text_input("Cim szures", key="table_filter_title")
-            filter_entity = filter_col2.selectbox(
+            filter_entity = filter_col2.multiselect(
                 "Szures entitasra",
-                [NONE_OPTION] + ENTITY_OPTIONS,
+                ENTITY_OPTIONS,
+                default=st.session_state.get("table_filter_entity", []),
                 key="table_filter_entity",
             )
-            filter_status = filter_col3.selectbox(
+            filter_status = filter_col3.multiselect(
                 "Szures statuszra",
-                [NONE_OPTION] + STATUS_OPTIONS,
+                STATUS_OPTIONS,
+                default=st.session_state.get("table_filter_status", []),
                 key="table_filter_status",
             )
             filter_organization = filter_col4.text_input("Organization szures", key="table_filter_organization")
@@ -2885,10 +3014,11 @@ def app() -> None:
             filter_col5, filter_col6, filter_col7, filter_col8 = st.columns(4)
             filter_project = filter_col5.text_input("Projekt szures", key="table_filter_project")
             filter_case = filter_col6.text_input("Ugy szures", key="table_filter_case")
-            filter_planning_bucket = filter_col7.selectbox(
+            filter_planning_bucket = filter_col7.multiselect(
                 "Tervezesi hely szures",
-                [NONE_OPTION] + planning_options,
-                format_func=lambda value: NONE_OPTION if value == NONE_OPTION else planning_bucket_label(value, planning_titles),
+                planning_options,
+                format_func=lambda value: planning_bucket_label(value, planning_titles),
+                default=st.session_state.get("table_filter_planning_bucket", []),
                 key="table_filter_planning_bucket",
             )
             filter_text = filter_col8.text_input("Altalanos szoveges szures", key="table_filter_text")
@@ -2930,10 +3060,10 @@ def app() -> None:
             if filter_title.strip():
                 needle = filter_title.strip().lower()
                 filtered_records = [record for record in filtered_records if needle in record.title.lower()]
-            if filter_entity != NONE_OPTION:
-                filtered_records = [record for record in filtered_records if record.entity_type == filter_entity]
-            if filter_status != NONE_OPTION:
-                filtered_records = [record for record in filtered_records if record.status == filter_status]
+            if filter_entity:
+                filtered_records = [record for record in filtered_records if record.entity_type in filter_entity]
+            if filter_status:
+                filtered_records = [record for record in filtered_records if record.status in filter_status]
             if filter_organization.strip():
                 needle = filter_organization.strip().lower()
                 filtered_records = [record for record in filtered_records if needle in record.organization.lower()]
@@ -2946,8 +3076,8 @@ def app() -> None:
             if filter_case.strip():
                 needle = filter_case.strip().lower()
                 filtered_records = [record for record in filtered_records if needle in record.case_name.lower()]
-            if filter_planning_bucket != NONE_OPTION:
-                filtered_records = [record for record in filtered_records if record.planning_bucket == filter_planning_bucket]
+            if filter_planning_bucket:
+                filtered_records = [record for record in filtered_records if record.planning_bucket in filter_planning_bucket]
             if filter_text.strip():
                 needle = filter_text.strip().lower()
                 filtered_records = [
@@ -3223,26 +3353,24 @@ def app() -> None:
             st.info("Még nincs archivált rekord.")
         else:
             st.caption("Az archivált rekordok kikerülnek a fő operatív nézetekből, de a RAG és a keresés továbbra is láthatja őket kontextusként.")
-            archive_pick = st.selectbox(
-                "Archivált rekord",
-                options=[record.record_id for record in archived_records],
-                format_func=lambda record_id: record_label(next(record for record in archived_records if record.record_id == record_id)),
-                key="archive_record_picker",
-            )
+            history_events = load_events(history_events_path)
             restore_status = st.selectbox(
                 "Visszaállítás ide",
                 options=["inbox", "next", "active", "waiting"],
                 key="archive_restore_status",
             )
-            action_col1, action_col2 = st.columns(2)
-            if action_col1.button("Megnyit részletben", key="archive_open_detail"):
-                st.session_state["selected_record_id"] = archive_pick
-                st.rerun()
-            if action_col2.button("Visszahozás", key="archive_restore"):
-                selected_archived = next((record for record in archived_records if record.record_id == archive_pick), None)
-                if selected_archived:
+            for record in sorted(archived_records, key=lambda item: item.updated_at, reverse=True):
+                archived_at, previous_status = archive_metadata(history_events, record.record_id)
+                row_col1, row_col2, row_col3 = st.columns([6, 1.4, 1.4])
+                row_col1.markdown(
+                    f"**{record_label(record)}**  \nArchiválva: `{archived_at or '-'}` | Előtte: `{previous_status or '-'}`"
+                )
+                if row_col2.button("Megnyit", key=f"archive_open_{record.record_id}"):
+                    st.session_state["selected_record_id"] = record.record_id
+                    st.rerun()
+                if row_col3.button("Visszahozás", key=f"archive_restore_{record.record_id}"):
                     persist_record(
-                        update_record(selected_archived, status=restore_status),
+                        update_record(record, status=restore_status),
                         source_dir,
                         config,
                         records_path,
@@ -3250,6 +3378,11 @@ def app() -> None:
                         chroma_dir,
                         history_events_path,
                     )
+                st.divider()
+
+    with tab_history:
+        st.subheader("History")
+        render_global_history(history_events_path, records, records_path, source_dir, config, index_path, chroma_dir)
 
     with tab_export:
         st.subheader("MD Export")
@@ -3379,6 +3512,105 @@ def app() -> None:
                 )
                 st.success(f"Markdown export mentve: {export_path}")
 
+    with tab_thunderbird:
+        st.subheader("Thunderbird Import")
+        st.caption("Ez a modul csak felderíti és előkészíti a leveleket. A RAG-ba semmi nem kerül be, amíg külön rá nem nyomsz az Upsert gombra.")
+        if not config.thunderbird_import_md:
+            st.warning("A `.env` fájlban nincs beállítva a `THUNDERBIRD_IMPORT_MD` változó.")
+        else:
+            st.write(f"Config MD: `{config.thunderbird_import_md}`")
+            tb_config, tb_config_errors = load_thunderbird_import_config(config.thunderbird_import_md)
+            if tb_config_errors:
+                for error in tb_config_errors:
+                    st.error(error)
+            if tb_config:
+                roots_text = "\n".join(f"- `{root}`" for root in tb_config.mail_roots) or "-"
+                st.markdown(f"**Mail gyökerek**\n{roots_text}")
+                st.caption(
+                    "A `profile_root` lehet maga a Thunderbird profilkönyvtár is, amelyben a `global-messages-db.sqlite`, `ImapMail` vagy `Mail` mappák vannak. Megadhatsz közvetlen `ImapMail` vagy `Mail` útvonalat is."
+                )
+                action_col1, action_col2 = st.columns(2)
+                if action_col1.button("Mailboxok felderítése", key="tb_discover_mailboxes"):
+                    inventory, inventory_errors = discover_mailboxes(tb_config)
+                    st.session_state["tb_inventory_rows"] = [item.to_dict() for item in inventory]
+                    st.session_state["tb_inventory_errors"] = inventory_errors
+                    st.session_state["tb_preview_rows"] = []
+                    st.session_state["tb_preview_items"] = []
+                    st.rerun()
+                if action_col2.button("Preview frissítése", key="tb_preview_mailboxes"):
+                    inventory_rows = st.session_state.get("tb_inventory_rows", [])
+                    if not inventory_rows:
+                        inventory, inventory_errors = discover_mailboxes(tb_config)
+                        inventory_rows = [item.to_dict() for item in inventory]
+                        st.session_state["tb_inventory_rows"] = inventory_rows
+                        st.session_state["tb_inventory_errors"] = inventory_errors
+                    inventory_objects = [ThunderbirdMailboxInventory(**row) for row in inventory_rows]
+                    previews, preview_errors = preview_messages(inventory_objects, tb_config.since_days, tb_config.max_messages_per_mailbox)
+                    st.session_state["tb_preview_items"] = [item.to_dict() for item in previews]
+                    st.session_state["tb_preview_rows"] = thunderbird_preview_rows(previews)
+                    st.session_state["tb_preview_errors"] = preview_errors
+                    st.rerun()
+
+                inventory_rows = st.session_state.get("tb_inventory_rows", [])
+                if inventory_rows:
+                    st.markdown("**Talált mailboxok**")
+                    st.dataframe(pd.DataFrame(inventory_rows), use_container_width=True, hide_index=True)
+                for error in st.session_state.get("tb_inventory_errors", []):
+                    st.warning(error)
+
+                preview_rows = st.session_state.get("tb_preview_rows", [])
+                if preview_rows:
+                    st.markdown("**Előkészített levelek**")
+                    edited_preview_df = st.data_editor(
+                        pd.DataFrame(preview_rows),
+                        use_container_width=True,
+                        hide_index=True,
+                        key="tb_preview_editor",
+                        disabled=["preview_id", "subject", "from", "to", "sent_at", "mailbox", "account", "message_id", "body_preview"],
+                        column_config={
+                            "selected": st.column_config.CheckboxColumn("upsert"),
+                            "subject": st.column_config.TextColumn("tárgy"),
+                            "from": st.column_config.TextColumn("feladó"),
+                            "to": st.column_config.TextColumn("címzett"),
+                            "sent_at": st.column_config.TextColumn("dátum"),
+                            "mailbox": st.column_config.TextColumn("mailbox"),
+                            "account": st.column_config.TextColumn("fiók"),
+                            "message_id": st.column_config.TextColumn("message-id"),
+                            "body_preview": st.column_config.TextColumn("előnézet"),
+                        },
+                    )
+                    st.caption("Amíg itt csak preview-zol és nem nyomsz Upsertet, semmi nem kerül be a RAG-ba.")
+                    if st.button("Upsert a RAG-ba", key="tb_upsert_to_rag"):
+                        rows = edited_preview_df.to_dict("records")
+                        preview_item_lookup = {
+                            str(item.get("preview_id", "")): item
+                            for item in st.session_state.get("tb_preview_items", [])
+                        }
+                        selected_previews = [
+                            ThunderbirdMessagePreview(**preview_item_lookup[str(row.get("preview_id", ""))])
+                            for row in rows
+                            if bool(row.get("selected")) and str(row.get("preview_id", "")) in preview_item_lookup
+                        ]
+                        if not selected_previews:
+                            st.info("Nincs kijelölt levél upsertra.")
+                        else:
+                            record_lookup = {record.record_id: record for record in records}
+                            for preview in selected_previews:
+                                mapped_record = thunderbird_preview_to_record(preview)
+                                record_lookup[mapped_record.record_id] = mapped_record
+                            persist_records_bulk(
+                                list(record_lookup.values()),
+                                source_dir,
+                                config,
+                                records_path,
+                                index_path,
+                                chroma_dir,
+                                history_events_path,
+                                f"Thunderbird import upsert kész: {len(selected_previews)} levél.",
+                            )
+                for error in st.session_state.get("tb_preview_errors", []):
+                    st.warning(error)
+
     with tab_execution:
         render_execution_graph(records, planning_layout, planning_layout_path, source_dir, config, records_path, index_path, chroma_dir, history_events_path, export_selection_path, export_selected_ids)
 
@@ -3418,13 +3650,14 @@ def app() -> None:
                     default=st.session_state.get("context_graph_statuses", []),
                     key="context_graph_statuses",
                 )
-                active_only = filter_col3.checkbox("Csak aktivak", value=st.session_state.get("context_graph_active_only", True), key="context_graph_active_only")
+                active_only = filter_col3.checkbox("Csak aktivak", value=st.session_state.get("context_graph_active_only", False), key="context_graph_active_only")
 
-                filter_col4, filter_col5, filter_col6, filter_col7 = st.columns(4)
+                filter_col4, filter_col5, filter_col6, filter_col7, filter_col8 = st.columns(5)
                 context_project = filter_col4.text_input("Projekt szures", key="context_graph_project")
                 context_case = filter_col5.text_input("Ugy szures", key="context_graph_case")
                 context_due_from = filter_col6.date_input("Due - tol", value=st.session_state.get("context_graph_due_from"), key="context_graph_due_from")
                 context_due_to = filter_col7.date_input("Due - ig", value=st.session_state.get("context_graph_due_to"), key="context_graph_due_to")
+                context_text = filter_col8.text_input("Kifejezés", key="context_graph_text")
 
                 toggle_col1, toggle_col2 = st.columns(2)
                 show_relations = toggle_col1.checkbox("Relaciok mutatasa", value=st.session_state.get("context_graph_show_relations", True), key="context_graph_show_relations")
@@ -3442,6 +3675,7 @@ def app() -> None:
                 filter_statuses,
                 context_project,
                 context_case,
+                context_text,
                 active_only,
                 context_due_from,
                 context_due_to,
