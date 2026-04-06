@@ -61,6 +61,8 @@ class KnowledgeRecord:
     graph_edges: list[dict] = field(default_factory=list)
     decision_needed: bool = False
     decision_context: str = ""
+    abbreviation: str = ""
+    icon: str = ""
     created_at: str = field(default_factory=utc_now_iso)
     updated_at: str = field(default_factory=utc_now_iso)
     start_at: str | None = None
@@ -96,6 +98,8 @@ class KnowledgeRecord:
         payload.setdefault("source_type", "manual")
         payload.setdefault("decision_needed", False)
         payload.setdefault("decision_context", "")
+        payload.setdefault("abbreviation", "")
+        payload.setdefault("icon", "")
         payload.setdefault("created_at", utc_now_iso())
         payload.setdefault("updated_at", payload["created_at"])
         payload.setdefault("start_at", None)
@@ -136,6 +140,8 @@ class KnowledgeRecord:
                 if isinstance(item, dict)
             ),
             self.decision_context,
+            self.abbreviation,
+            self.icon,
         ]
         return "\n".join(part for part in parts if part).strip()
 
@@ -154,6 +160,8 @@ class KnowledgeRecord:
             "people": ", ".join(self.related_people),
             "tags": ", ".join(self.tags),
             "decision_needed": self.decision_needed,
+            "abbreviation": self.abbreviation,
+            "icon": self.icon,
             "created_at": self.created_at,
             "start_at": self.start_at or "",
             "due_at": self.due_at or "",
@@ -163,5 +171,6 @@ class KnowledgeRecord:
             "next_step_estimate": self.next_step_estimate,
             "planning_bucket": self.planning_bucket,
             "focus_rank": self.focus_rank if self.focus_rank is not None else "",
+            "export_selected": False,
             "updated_at": self.updated_at,
         }

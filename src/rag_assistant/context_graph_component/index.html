@@ -667,8 +667,11 @@
                 style="left:${pos.x}px;top:${pos.y}px;--accent:${accent};--accent-soft:${soft};"
               >
                 <div class="node-title">
-                  <span class="node-title-main"><span class="shape ${shape}" style="--accent:${accent};margin-right:8px;"></span>${escapeHtml(node.label)}</span>
-                  ${childCount ? `<button class="toggle-btn" type="button" data-toggle-node="${escapeHtml(node.id)}">${isCollapsed ? `+` : `−`}</button>` : ``}
+                  <span class="node-title-main"><span class="shape ${shape}" style="--accent:${accent};margin-right:8px;"></span>${node.icon ? `<span style="margin-right:6px;">${escapeHtml(node.icon)}</span>` : ``}${escapeHtml(node.label)}</span>
+                  <span style="display:flex;align-items:center;gap:6px;">
+                    ${!node.synthetic ? `<button class="toggle-btn" type="button" data-toggle-export="${escapeHtml(node.id)}">${node.export_selected ? `◉` : `◎`}</button>` : ``}
+                    ${childCount ? `<button class="toggle-btn" type="button" data-toggle-node="${escapeHtml(node.id)}">${isCollapsed ? `+` : `−`}</button>` : ``}
+                  </span>
                 </div>
                 <div class="node-meta">${chips}</div>
               </div>
@@ -741,6 +744,14 @@
               const nextState = { ...collapsedState, [nodeId]: !collapsedState[nodeId] };
               writeCollapsedState(nextState);
               render(payload);
+            });
+          });
+          app.querySelectorAll("[data-toggle-export]").forEach(button => {
+            button.addEventListener("click", event => {
+              event.preventDefault();
+              event.stopPropagation();
+              const recordId = button.dataset.toggleExport || "";
+              if (recordId) sendEvent({ action: "toggle_export", record_id: recordId });
             });
           });
           app.querySelectorAll("[data-node-id]").forEach(nodeEl => {

@@ -62,3 +62,23 @@ def load_events(path: Path) -> list[dict]:
             continue
         events.append(json.loads(line))
     return events
+
+
+def summarize_event(event: dict) -> str:
+    action = event.get("action_type", "-")
+    changed_fields = event.get("changed_fields", [])
+    before = event.get("before") or {}
+    after = event.get("after") or {}
+    if action == "move":
+        movement = event.get("movement") or {}
+        return f"Áthelyezés: {movement.get('from', '') or 'nincs'} -> {movement.get('to', '') or 'nincs'}"
+    if action == "create":
+        return f"Létrehozás: {after.get('title', event.get('record_id', '-'))}"
+    if action == "delete":
+        return f"Törlés: {before.get('title', event.get('record_id', '-'))}"
+    if action == "export":
+        return f"Export: {(after or {}).get('path', '')}"
+    details: list[str] = []
+    for field in changed_fields[:5]:
+        details.append(f"{field}: {before.get(field, '') or '-'} -> {after.get(field, '') or '-'}")
+    return " | ".join(details) if details else "Módosítás"

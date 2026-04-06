@@ -3,8 +3,10 @@ from __future__ import annotations
 from dataclasses import replace
 from datetime import date, timedelta
 from html import escape
+import json
 import re
 import subprocess
+from pathlib import Path
 
 import pandas as pd
 import streamlit as st
@@ -13,7 +15,7 @@ import streamlit.components.v1 as components
 from rag_assistant.config import load_config
 from rag_assistant.context_graph_component import context_graph
 from rag_assistant.execution_dnd_component import execution_dnd_board
-from rag_assistant.history import load_events
+from rag_assistant.history import append_event, load_events, summarize_event
 from rag_assistant.index_store import load_index, save_index
 from rag_assistant.ingest import build_index
 from rag_assistant.kanban_dnd_component import kanban_dnd_board
@@ -33,6 +35,7 @@ from rag_assistant.planning_layout import (
     rename_day,
     remove_block,
     remove_day,
+    move_block_to_day,
     remove_week,
     save_planning_layout,
 )
@@ -71,6 +74,56 @@ HIERARCHY_FIELD_BY_ENTITY = {
     "project": "project",
     "case": "case_name",
 }
+
+
+def load_export_selection(path: Path) -> list[str]:
+    if not path.exists():
+        return []
+    try:
+        payload = json.loads(path.read_text(encoding="utf-8"))
+    except json.JSONDecodeError:
+        return []
+    values = payload.get("record_ids", []) if isinstance(payload, dict) else []
+    return [str(item).strip() for item in values if str(item).strip()]
+
+
+def save_export_selection(path: Path, record_ids: list[str]) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    unique_ids: list[str] = []
+    seen: set[str] = set()
+    for record_id in record_ids:
+        clean_id = str(record_id).strip()
+        if not clean_id or clean_id in seen:
+            continue
+        seen.add(clean_id)
+        unique_ids.append(clean_id)
+    path.write_text(json.dumps({"record_ids": unique_ids}, ensure_ascii=False, indent=2), encoding="utf-8")
+
+
+def toggle_export_selection(path: Path, record_id: str) -> list[str]:
+    current = load_export_selection(path)
+    if record_id in current:
+        current = [item for item in current if item != record_id]
+    else:
+        current.append(record_id)
+    save_export_selection(path, current)
+    return current
+
+
+def set_export_selection(path: Path, record_ids: list[str]) -> list[str]:
+    save_export_selection(path, record_ids)
+    return load_export_selection(path)
+
+
+def export_filename_suggestion(records: list[KnowledgeRecord]) -> str:
+    if not records:
+        return f"export-{date.today().isoformat()}.md"
+    title_bits = [re.sub(r"[^a-z0-9]+", "-", record.title.strip().lower()).strip("-") for record in records[:3]]
+    title_bits = [bit for bit in title_bits if bit]
+    base = "-".join(title_bits) or "export"
+    if len(records) > 3:
+        base += f"-plus-{len(records)-3}"
+    return f"{base}-{date.today().isoformat()}.md"
 
 
 def record_label(record: KnowledgeRecord) -> str:
@@ -336,6 +389,8 @@ def build_execution_sections(layout: dict) -> list[dict]:
     def make_simple_week(day_items: list[dict], week_key: str, week_title: str, week_start: date) -> dict | None:
         must_aliases: list[str] = []
         prefer_aliases: list[str] = []
+        session_blocks: list[dict] = []
+        primary_day_key = day_items[0].get("key", "") if day_items else ""
         for day in day_items:
             for block in day.get("blocks", []):
                 lane = block.get("lane", "session")
@@ -344,12 +399,19 @@ def build_execution_sections(layout: dict) -> list[dict]:
                     must_aliases.append(block_key)
                 elif lane == "prefer" and block_key:
                     prefer_aliases.append(block_key)
-        if not must_aliases and not prefer_aliases:
+                elif lane not in {"focus"} and block_key:
+                    cloned_block = dict(block)
+                    cloned_block["alias_keys"] = [block_key]
+                    cloned_block["drop_target_key"] = block_key
+                    cloned_block["source_day_key"] = day.get("key", "")
+                    session_blocks.append(cloned_block)
+        if not must_aliases and not prefer_aliases and not session_blocks:
             return None
         pseudo_day = {
             "key": f"{week_key}-summary",
             "title": week_title,
             "date": week_start.isoformat(),
+            "source_day_key": primary_day_key,
             "blocks": [
                 {
                     "key": f"{week_key}-must-summary",
@@ -357,6 +419,7 @@ def build_execution_sections(layout: dict) -> list[dict]:
                     "lane": "must",
                     "alias_keys": must_aliases,
                     "drop_target_key": must_aliases[0] if must_aliases else "",
+                    "source_day_key": primary_day_key,
                 },
                 {
                     "key": f"{week_key}-prefer-summary",
@@ -364,7 +427,9 @@ def build_execution_sections(layout: dict) -> list[dict]:
                     "lane": "prefer",
                     "alias_keys": prefer_aliases,
                     "drop_target_key": prefer_aliases[0] if prefer_aliases else "",
+                    "source_day_key": primary_day_key,
                 },
+                *session_blocks,
             ],
         }
         return make_week_group(week_start, [pseudo_day], title=week_title, week_key=week_key)
@@ -618,9 +683,9 @@ def matches_presence_filter(value: str | None, mode: str) -> bool:
     return True
 
 
-def render_gantt_view(records: list[KnowledgeRecord]) -> None:
+def render_gantt_view(records: list[KnowledgeRecord], export_selection_path: Path, source_dir, config, records_path, index_path, chroma_dir, history_events_path) -> None:
     st.subheader("GANTT")
-    gantt_records = [record for record in records if record.entity_type in {"area", "organization", "team", "project", "case", "task"}]
+    gantt_records = [record for record in records if record.status != "archived" and record.entity_type in {"area", "organization", "team", "project", "case", "task"}]
     if not gantt_records:
         st.info("Meg nincs area / organization / team / project / case / task rekord a GANTT nezethez.")
         return
@@ -751,10 +816,13 @@ def render_gantt_view(records: list[KnowledgeRecord]) -> None:
             pieces.append(f'<div class="gantt-mark deadline" style="left:{deadline_idx * column_width + column_width / 2 - 10}px;">&#9664;</div>')
         return "".join(pieces)
 
-    def row_html(record: KnowledgeRecord, level: int) -> str:
+    def row_html(record: KnowledgeRecord, level: int, has_children: bool) -> str:
+        indent = "&nbsp;" * (level * 6)
+        tree_icon = "▾" if has_children else "•"
+        export_icon = "◉" if record.record_id in set(load_export_selection(export_selection_path)) else "◎"
         return f"""
         <div class="gantt-row level-{level}">
-          <div class="gantt-cell gantt-name">{escape(record.title)}</div>
+          <div class="gantt-cell gantt-name">{indent}<span class="gantt-tree-icon">{tree_icon}</span> {export_icon} {escape(record.title)}</div>
           <div class="gantt-cell">{escape(record.entity_type)}</div>
           <div class="gantt-cell">{escape(record.start_at or "-")}</div>
           <div class="gantt-cell">{escape(record.due_at or "-")}</div>
@@ -769,9 +837,9 @@ def render_gantt_view(records: list[KnowledgeRecord]) -> None:
     def render_tree(record: KnowledgeRecord, level: int) -> str:
         children = sort_records(children_by_parent.get(record.record_id, []))
         if not children:
-            return row_html(record, level)
+            return row_html(record, level, False)
         children_html = "".join(render_tree(child, level + 1) for child in children)
-        return f'<details class="gantt-details" open><summary>{row_html(record, level)}</summary><div class="gantt-children">{children_html}</div></details>'
+        return f'<details class="gantt-details" open><summary>{row_html(record, level, True)}</summary><div class="gantt-children">{children_html}</div></details>'
 
     for root_record in sort_records(roots):
         body_rows.append(render_tree(root_record, 0))
@@ -784,13 +852,14 @@ def render_gantt_view(records: list[KnowledgeRecord]) -> None:
     gantt_html = f"""
     <style>
     .gantt-shell {{ border:1px solid #e5e7eb; border-radius:16px; background:#fff; overflow:auto; max-height:760px; width:100%; }}
-    .gantt-header, .gantt-row {{ display:grid; grid-template-columns: 260px 90px 110px 110px 110px 160px {len(units) * column_width}px; align-items:center; }}
-    .gantt-header {{ position:sticky; top:0; z-index:2; background:#f8fafc; border-bottom:1px solid #e5e7eb; font-weight:700; }}
-    .gantt-cell {{ padding:8px 10px; border-right:1px solid #eef2f7; font-size:12px; min-height:42px; display:flex; align-items:center; }}
+    .gantt-header, .gantt-row {{ display:grid; grid-template-columns: 220px 80px 96px 96px 96px 130px {len(units) * column_width}px; align-items:center; }}
+    .gantt-header {{ position:sticky; top:0; z-index:20; background:#f8fafc; border-bottom:1px solid #e5e7eb; font-weight:700; }}
+    .gantt-cell {{ padding:8px 10px; border-right:1px solid #eef2f7; font-size:12px; min-height:42px; display:flex; align-items:center; background:transparent; }}
     .gantt-name {{ font-weight:600; }}
-    .gantt-row {{ border-bottom:1px solid #f1f5f9; }}
+    .gantt-row {{ border-bottom:1px solid #f1f5f9; position:relative; z-index:0; }}
     .gantt-row.level-1 .gantt-name {{ padding-left:22px; }}
     .gantt-row.level-2 .gantt-name {{ padding-left:40px; }}
+    .gantt-tree-icon {{ display:inline-block; width:14px; color:#475569; }}
     .gantt-timeline {{ position:relative; height:42px; background-image: linear-gradient(to right, #eef2f7 1px, transparent 1px); background-size:{column_width}px 100%; overflow:hidden; }}
     .gantt-weekend-bg {{ position:absolute; top:0; bottom:0; background:#f1f5f9; z-index:0; }}
     .gantt-span {{ position:absolute; top:16px; height:10px; border-radius:999px; background:rgba(59,130,246,0.16); border:1px solid rgba(59,130,246,0.28); z-index:1; }}
@@ -820,29 +889,64 @@ def render_gantt_view(records: list[KnowledgeRecord]) -> None:
     """
     components.html(gantt_html, height=820, scrolling=True)
 
-    gantt_edit_ids = [record.record_id for record in visible_records]
-    gantt_selected_id = st.selectbox(
-        "GANTT szerkesztés",
-        options=gantt_edit_ids,
-        format_func=lambda record_id: record_label(lookup[record_id]),
-        key="gantt_selected_record_id",
-    )
-    gantt_selected = lookup[gantt_selected_id]
-    edit_col1, edit_col2, edit_col3, edit_col4 = st.columns(4)
-    gantt_title = edit_col1.text_input("Név", value=gantt_selected.title, key=f"gantt_title_{gantt_selected.record_id}")
-    edit_col2.caption(f"Típus: {gantt_selected.entity_type}")
-    gantt_start = edit_col2.date_input("Start", value=parse_optional_date(gantt_selected.start_at), key=f"gantt_start_{gantt_selected.record_id}")
-    gantt_due = edit_col3.date_input("Due", value=parse_optional_date(gantt_selected.due_at), key=f"gantt_due_{gantt_selected.record_id}")
-    gantt_deadline = edit_col4.date_input("Deadline", value=parse_optional_date(gantt_selected.deadline), key=f"gantt_deadline_{gantt_selected.record_id}")
-    if st.button("GANTT sor mentése", key=f"gantt_save_{gantt_selected.record_id}"):
-        updated_record = update_record(
-            gantt_selected,
-            title=gantt_title.strip(),
-            start_at=gantt_start.isoformat() if isinstance(gantt_start, date) else None,
-            due_at=gantt_due.isoformat() if isinstance(gantt_due, date) else None,
-            deadline=gantt_deadline.isoformat() if isinstance(gantt_deadline, date) else None,
+    st.markdown("**GANTT táblás szerkesztés**")
+    export_selected_set = set(load_export_selection(export_selection_path))
+    gantt_rows = []
+    for record in visible_records:
+        gantt_rows.append(
+            {
+                "record_id": record.record_id,
+                "title": record.title,
+                "entity_type": record.entity_type,
+                "start_at": record.start_at or "",
+                "due_at": record.due_at or "",
+                "deadline": record.deadline or "",
+                "export_selected": record.record_id in export_selected_set,
+            }
         )
-        persist_record(with_synced_hierarchy_title(updated_record), source_dir, config, records_path, index_path, chroma_dir, history_events_path)
+    gantt_df = pd.DataFrame(gantt_rows)
+    edited_gantt_df = st.data_editor(
+        gantt_df,
+        use_container_width=True,
+        hide_index=True,
+        key="gantt_table_editor",
+        disabled=["record_id", "entity_type"],
+        column_config={
+            "entity_type": st.column_config.TextColumn("típus", disabled=True),
+            "start_at": st.column_config.TextColumn("start"),
+            "due_at": st.column_config.TextColumn("due"),
+            "deadline": st.column_config.TextColumn("deadline"),
+            "export_selected": st.column_config.CheckboxColumn("export"),
+            "record_id": st.column_config.TextColumn("record_id", disabled=True),
+        },
+    )
+    if st.button("GANTT változások mentése", key="gantt_apply_changes"):
+        record_lookup = {record.record_id: record for record in records}
+        updated_lookup = {}
+        changed_count = 0
+        edited_export_ids = [str(row.get("record_id", "")).strip() for row in edited_gantt_df.to_dict("records") if bool(row.get("export_selected"))]
+        for row in edited_gantt_df.to_dict("records"):
+            record_id = normalize_table_value(row.get("record_id"))
+            existing = record_lookup.get(record_id)
+            if not existing:
+                continue
+            updated = update_record(
+                existing,
+                title=normalize_table_value(row.get("title")) or existing.title,
+                start_at=normalize_table_value(row.get("start_at")) or None,
+                due_at=normalize_table_value(row.get("due_at")) or None,
+                deadline=normalize_table_value(row.get("deadline")) or None,
+            )
+            if updated.to_dict() != existing.to_dict():
+                updated = update_record(updated, updated_at=utc_now_iso())
+                changed_count += 1
+            updated_lookup[record_id] = with_synced_hierarchy_title(updated)
+        set_export_selection(export_selection_path, edited_export_ids)
+        merged_records = [updated_lookup.get(record.record_id, record) for record in records]
+        if changed_count == 0:
+            st.info("Nincs alkalmazandó GANTT módosítás.")
+        else:
+            persist_records_bulk(merged_records, source_dir, config, records_path, index_path, chroma_dir, history_events_path, f"GANTT változások mentve: {changed_count} rekord.")
 
 
 def get_selected_record(records: list[KnowledgeRecord]) -> KnowledgeRecord | None:
@@ -913,6 +1017,44 @@ def format_next_steps(steps: list[dict]) -> str:
             continue
         lines.append(f"{prefix} {title}" + (f" | {estimate}" if estimate else ""))
     return "\n".join(lines)
+
+
+def normalize_estimate_hhmm(value: str) -> str:
+    text = (value or "").strip()
+    if not text:
+        return ""
+    match = re.fullmatch(r"(\d{1,3}):([0-5]\d)", text)
+    if match:
+        hours = int(match.group(1))
+        minutes = int(match.group(2))
+        return f"{hours}:{minutes:02d}"
+    return text
+
+
+def estimate_to_minutes(value: str) -> int | None:
+    text = normalize_estimate_hhmm(value)
+    match = re.fullmatch(r"(\d{1,3}):([0-5]\d)", text)
+    if not match:
+        return None
+    return int(match.group(1)) * 60 + int(match.group(2))
+
+
+def minutes_to_keycap(value: int | None) -> str:
+    if value is None:
+        return "🤖"
+    mapping = {
+        "0": "0️⃣",
+        "1": "1️⃣",
+        "2": "2️⃣",
+        "3": "3️⃣",
+        "4": "4️⃣",
+        "5": "5️⃣",
+        "6": "6️⃣",
+        "7": "7️⃣",
+        "8": "8️⃣",
+        "9": "9️⃣",
+    }
+    return "".join(mapping.get(ch, ch) for ch in str(value))
 
 
 def markdown_import_entity(line: str) -> tuple[str, str, str]:
@@ -1004,6 +1146,189 @@ def build_records_from_markdown_import(parent_record: KnowledgeRecord, markdown_
     return created
 
 
+def export_record_scope(
+    records: list[KnowledgeRecord],
+    selected_ids: list[str],
+    include_children: bool,
+    include_parents: bool,
+    include_relations: bool,
+) -> list[KnowledgeRecord]:
+    lookup = {record.record_id: record for record in records}
+    chosen: dict[str, KnowledgeRecord] = {record_id: lookup[record_id] for record_id in selected_ids if record_id in lookup}
+    queue = list(chosen.keys())
+    while queue:
+        record_id = queue.pop(0)
+        record = lookup.get(record_id)
+        if not record:
+            continue
+        if include_children:
+            for child in records:
+                if child.parent_id == record_id and child.record_id not in chosen:
+                    chosen[child.record_id] = child
+                    queue.append(child.record_id)
+        if include_parents and record.parent_id and record.parent_id in lookup and record.parent_id not in chosen:
+            chosen[record.parent_id] = lookup[record.parent_id]
+            queue.append(record.parent_id)
+        if include_relations:
+            for edge in normalize_graph_edges(record.graph_edges, record.relations, record.record_id):
+                target_id = edge.get("target_id", "")
+                if target_id in lookup and target_id not in chosen:
+                    chosen[target_id] = lookup[target_id]
+    return list(chosen.values())
+
+
+def markdown_task_prefix(record: KnowledgeRecord) -> str:
+    return "- [x]" if record.entity_type == "task" and record.status == "done" else "- [ ]" if record.entity_type == "task" else "- "
+
+
+def render_markdown_blocks(records: list[KnowledgeRecord]) -> str:
+    lookup = {record.record_id: record for record in records}
+    children_by_parent: dict[str, list[KnowledgeRecord]] = {}
+    roots: list[KnowledgeRecord] = []
+    for record in records:
+        parent = lookup.get(record.parent_id) if record.parent_id else None
+        if parent:
+            children_by_parent.setdefault(parent.record_id, []).append(record)
+        else:
+            roots.append(record)
+
+    def sort_items(items: list[KnowledgeRecord]) -> list[KnowledgeRecord]:
+        return sorted(items, key=lambda item: item.title.lower())
+
+    lines: list[str] = []
+
+    def walk(record: KnowledgeRecord, depth: int) -> None:
+        indent = "  " * depth
+        lines.append(f"{indent}{markdown_task_prefix(record)}{record.title}")
+        for child in sort_items(children_by_parent.get(record.record_id, [])):
+            walk(child, depth + 1)
+
+    for root in sort_items(roots):
+        walk(root, 0)
+    return "\n".join(lines).strip()
+
+
+def _format_markdown_note_lines(content: str, depth: int) -> list[str]:
+    lines: list[str] = []
+    for raw_line in (content or "").splitlines():
+        text = raw_line.rstrip()
+        if not text.strip():
+            continue
+        leading = len(raw_line) - len(raw_line.lstrip(" "))
+        extra_depth = leading // 2
+        indent = "  " * (depth + extra_depth)
+        lines.append(f"{indent}- {text.strip()}")
+    return lines
+
+
+def render_markdown_obsidian(records: list[KnowledgeRecord], all_records: list[KnowledgeRecord], include_notes_by_id: dict[str, bool], include_children_by_id: dict[str, bool], include_parents_by_id: dict[str, bool]) -> str:
+    lookup = {record.record_id: record for record in records}
+    all_lookup = {record.record_id: record for record in all_records}
+    children_by_parent: dict[str, list[KnowledgeRecord]] = {}
+    for record in records:
+        parent = lookup.get(record.parent_id) if record.parent_id else None
+        if parent:
+            children_by_parent.setdefault(parent.record_id, []).append(record)
+
+    def sort_items(items: list[KnowledgeRecord]) -> list[KnowledgeRecord]:
+        return sorted(items, key=lambda item: item.title.lower())
+
+    lines: list[str] = []
+
+    def place_path(record: KnowledgeRecord) -> str:
+        bits: list[str] = []
+        if record.organization:
+            bits.append(f"{record.organization} (organization)")
+        if record.team:
+            bits.append(f"{record.team} (team)")
+        if record.project:
+            bits.append(f"{record.project} (project)")
+        if record.case_name:
+            bits.append(f"{record.case_name} (case)")
+        return " / ".join(bits)
+
+    def lineage_records(record: KnowledgeRecord) -> list[KnowledgeRecord]:
+        values: list[KnowledgeRecord] = []
+        for candidate in all_records:
+            if candidate.entity_type == "organization" and (candidate.organization or candidate.title) == record.organization:
+                values.append(candidate)
+            elif candidate.entity_type == "team" and (candidate.team or candidate.title) == record.team and candidate.organization == record.organization:
+                values.append(candidate)
+            elif candidate.entity_type == "project" and (candidate.project or candidate.title) == record.project and candidate.team == record.team and candidate.organization == record.organization:
+                values.append(candidate)
+            elif candidate.entity_type == "case" and (candidate.case_name or candidate.title) == record.case_name and candidate.project == record.project and candidate.team == record.team and candidate.organization == record.organization:
+                values.append(candidate)
+        order = {"organization": 0, "team": 1, "project": 2, "case": 3}
+        return sorted(values, key=lambda item: order.get(item.entity_type, 99))
+
+    def lineage_prefix(record: KnowledgeRecord) -> tuple[str, str]:
+        lineage = lineage_records(record)
+        icons = "".join(item.icon for item in lineage if item.icon)
+        abbreviations = "-".join(item.abbreviation for item in lineage if item.abbreviation)
+        return icons, abbreviations
+
+    def node_prefix(record: KnowledgeRecord) -> str:
+        estimate_minutes = estimate_to_minutes(record.next_step_estimate)
+        estimate_prefix = minutes_to_keycap(estimate_minutes)
+        icons, abbreviations = lineage_prefix(record)
+        title = f"{record.title} – {record.next_step}" if record.next_step else record.title
+        prefix_head = f"{icons} {abbreviations}: ".strip()
+        if prefix_head.endswith(":") and not title:
+            prefix_head = prefix_head[:-1]
+        body = f"{prefix_head}{title}".strip()
+        if record.entity_type == "task":
+            return ("- [x] " if record.status == "done" else "- [ ] ") + f"{estimate_prefix} | {body}"
+        if record.entity_type == "event":
+            return f"- 🤖🗓️ | {body}"
+        return f"- 🤖 | {body}"
+
+    def walk(record: KnowledgeRecord, depth: int, allow_children: bool) -> None:
+        indent = "  " * depth
+        lines.append(f"{indent}{node_prefix(record)}")
+        info_bits = [f"type: {record.entity_type}", f"status: {record.status}"]
+        if record.start_at:
+            info_bits.append(f"start: {record.start_at}")
+        if record.due_at:
+            info_bits.append(f"due: {record.due_at}")
+        if record.deadline:
+            info_bits.append(f"deadline: {record.deadline}")
+        if record.next_step:
+            info_bits.append(f"next: {record.next_step}")
+        if record.next_step_estimate:
+            info_bits.append(f"estimate: {record.next_step_estimate}")
+        place = place_path(record)
+        if place:
+            info_bits.append(f"place: {place}")
+        lines.append(f"{indent}  - ℹ️ | " + " | ".join(info_bits))
+        if include_notes_by_id.get(record.record_id, True) and record.content.strip():
+            lines.append(f"{indent}  - 🗒️ jegyzetek:")
+            lines.extend(_format_markdown_note_lines(record.content, depth + 2))
+        if allow_children:
+            child_items = sort_items(children_by_parent.get(record.record_id, []))
+            if child_items:
+                lines.append(f"{indent}  - 🌿 leágazások")
+                for child in child_items:
+                    walk(child, depth + 2, True)
+
+    explicitly_selected = [record for record in records if record.record_id in include_notes_by_id or record.record_id in include_children_by_id or record.record_id in include_parents_by_id]
+    root_candidates: list[KnowledgeRecord] = []
+    for record in explicitly_selected:
+        if include_parents_by_id.get(record.record_id, False):
+            current = record
+            while current.parent_id and current.parent_id in all_lookup:
+                current = all_lookup[current.parent_id]
+            root_candidates.append(current)
+        else:
+            root_candidates.append(record)
+    seen_root_ids: set[str] = set()
+    for root in sort_items(root_candidates):
+        if root.record_id in seen_root_ids:
+            continue
+        seen_root_ids.add(root.record_id)
+        walk(root, 0, include_children_by_id.get(root.record_id, True))
+    return "\n".join(lines).strip() + "\n"
+
+
 def normalize_table_value(value) -> str:
     if pd.isna(value):
         return ""
@@ -1046,6 +1371,8 @@ def record_from_table_row(row: dict, existing: KnowledgeRecord) -> KnowledgeReco
         related_people=parse_csv_list(normalize_table_value(row.get("people"))),
         tags=parse_csv_list(normalize_table_value(row.get("tags"))),
         decision_needed=bool(row.get("decision_needed")),
+        abbreviation=normalize_table_value(row.get("abbreviation")),
+        icon=normalize_table_value(row.get("icon")),
         graph_edges=list(existing.graph_edges),
         start_at=start_at,
         due_at=due_at,
@@ -1444,13 +1771,17 @@ def render_record_editor(
             parent_id = record.parent_id or infer_parent_from_hierarchy(records, entity_type, hierarchy_values, record.record_id)
 
     summary = st.text_area("Rovid osszefoglalo", value=record.summary, height=100, key=f"{key_prefix}_summary")
-    content = st.text_area(
-        "Reszletes tartalom / Markdown jegyzet",
-        value=record.content,
-        height=320,
-        help="A sima beillesztett markdown itt nyers markdownkent mentodik el. Később egy gazdagabb editor is ugyanebből tud dolgozni.",
-        key=f"{key_prefix}_content",
-    )
+    meta_col1, meta_col2 = st.columns(2)
+    abbreviation = meta_col1.text_input("Rövidítés", value=record.abbreviation, key=f"{key_prefix}_abbreviation")
+    icon = meta_col2.text_input("Ikon", value=record.icon, key=f"{key_prefix}_icon", placeholder="pl. 🟡")
+    with st.expander("Jegyzet", expanded=False):
+        content = st.text_area(
+            "Markdown jegyzet",
+            value=record.content,
+            height=320,
+            help="A sima beillesztett markdown itt nyers markdownkent mentodik el. Később egy gazdagabb editor is ugyanebből tud dolgozni.",
+            key=f"{key_prefix}_content",
+        )
 
     tag_col, relation_col = st.columns(2)
     tags_raw = tag_col.text_input(
@@ -1529,7 +1860,7 @@ def render_record_editor(
     if show_next_steps:
         step_col1, step_col2 = st.columns(2)
         next_step = step_col1.text_input("Next step", value=record.next_step, key=f"{key_prefix}_next_step")
-        next_step_estimate = step_col2.text_input("Becsult ido", value=record.next_step_estimate, key=f"{key_prefix}_next_step_estimate", placeholder="pl. 25p vagy 1h")
+        next_step_estimate = step_col2.text_input("Becsult ido (H:MM)", value=normalize_estimate_hhmm(record.next_step_estimate), key=f"{key_prefix}_next_step_estimate", placeholder="pl. 0:20 vagy 1:30")
         next_steps_raw = st.text_area(
             "Next steps lista",
             value=format_next_steps(record.next_steps),
@@ -1559,12 +1890,14 @@ def render_record_editor(
         "graph_edges": graph_edges,
         "decision_needed": decision_needed,
         "decision_context": decision_context.strip(),
+        "abbreviation": abbreviation.strip(),
+        "icon": icon.strip(),
         "start_at": start_at.isoformat() if isinstance(start_at, date) else None,
         "due_at": due_at.isoformat() if isinstance(due_at, date) else None,
         "deadline": deadline.isoformat() if isinstance(deadline, date) else None,
         "event_at": event_at.isoformat() if isinstance(event_at, date) else None,
         "next_step": next_step.strip(),
-        "next_step_estimate": next_step_estimate.strip(),
+        "next_step_estimate": normalize_estimate_hhmm(next_step_estimate),
         "next_steps": parse_next_steps(next_steps_raw),
         "planning_bucket": planning_bucket,
         "focus_rank": focus_rank_value,
@@ -1695,7 +2028,7 @@ def filter_context_graph_records(
     due_from: date | None,
     due_to: date | None,
 ) -> list[KnowledgeRecord]:
-    filtered = records
+    filtered = [record for record in records if record.status != "archived"]
     if entity_filters:
         filtered = [record for record in filtered if record.entity_type in entity_filters]
     if status_filters:
@@ -1733,8 +2066,9 @@ def expand_context_graph_with_ancestors(records: list[KnowledgeRecord], base_rec
     return list(selected.values())
 
 
-def build_context_graph_payload(records: list[KnowledgeRecord], selected_node_id: str, show_relations: bool, show_only_hierarchy: bool, mode: str, force_fit_token: str = "") -> dict:
+def build_context_graph_payload(records: list[KnowledgeRecord], selected_node_id: str, show_relations: bool, show_only_hierarchy: bool, mode: str, force_fit_token: str = "", export_selected_ids: list[str] | None = None) -> dict:
     filtered_lookup = {record.record_id: record for record in records}
+    export_selected = set(export_selected_ids or [])
     hierarchy_lookup: dict[str, str] = {}
     nodes: dict[str, dict] = {}
     edges: list[dict] = []
@@ -1743,9 +2077,12 @@ def build_context_graph_payload(records: list[KnowledgeRecord], selected_node_id
     def synthetic_id(kind: str, *parts: str) -> str:
         return f"{kind}::" + "::".join(part for part in parts if part)
 
+    record_by_id = {record.record_id: record for record in records}
+
     def add_node(node_id: str, label: str, entity_type: str, status: str = "", project: str = "", case_name: str = "", due_at: str | None = None, synthetic: bool = False) -> None:
         if node_id in nodes:
             return
+        record = record_by_id.get(node_id)
         nodes[node_id] = {
             "id": node_id,
             "label": label,
@@ -1755,6 +2092,8 @@ def build_context_graph_payload(records: list[KnowledgeRecord], selected_node_id
             "case_name": case_name,
             "due_at": due_at or "",
             "synthetic": synthetic,
+            "export_selected": node_id in export_selected,
+            "icon": "" if synthetic or not record else record.icon,
         }
 
     def add_edge(source: str, target: str, kind: str, relation_type: str = "", label: str = "") -> None:
@@ -2018,7 +2357,7 @@ def render_execution_layout_manager(layout: dict, layout_path) -> None:
         st.caption("Kezzel felvett blokk torlese: a jobb oldali execution nezet napjanal a blokk melletti `x` gombbal.")
 
 
-def render_execution_graph(records: list[KnowledgeRecord], layout: dict, layout_path, source_dir, config, records_path, index_path, chroma_dir, history_path) -> None:
+def render_execution_graph(records: list[KnowledgeRecord], layout: dict, layout_path, source_dir, config, records_path, index_path, chroma_dir, history_path, export_selection_path, export_selected_ids: list[str]) -> None:
     st.subheader("Execution Graph")
     st.caption("Vizuális, drag-and-drop planning felület hét -> nap -> blokk szerkezettel. A blokkhoz tartozó nap dátuma a task `due` mezőjével kerül összhangba, a `deadline` ettől független marad.")
     render_execution_layout_manager(layout, layout_path)
@@ -2043,7 +2382,7 @@ def render_execution_graph(records: list[KnowledgeRecord], layout: dict, layout_
         exec_text = filter_col7.text_input("Szöveges szűrés", key="execution_filter_text")
         exec_only_with_content = st.checkbox("Csak ahol van tartalom", value=st.session_state.get("execution_only_with_content", False), key="execution_only_with_content")
 
-    task_records = [record for record in records if record.entity_type == "task"]
+    task_records = [record for record in records if record.entity_type == "task" and record.status != "archived"]
     filtered_task_records = task_records
     if exec_project.strip():
         needle = exec_project.strip().lower()
@@ -2076,7 +2415,9 @@ def render_execution_graph(records: list[KnowledgeRecord], layout: dict, layout_
     if not filtered_task_records:
         st.info("Meg nincs task rekord az execution graphhoz.")
         return
+    st.session_state["export_visible_ids"] = [record.record_id for record in filtered_task_records]
 
+    export_selected_set = set(export_selected_ids)
     component_payload = {
         "sections": filter_execution_sections_by_content(build_execution_sections(layout), filtered_task_records, exec_only_with_content),
         "tasks": [
@@ -2088,18 +2429,32 @@ def render_execution_graph(records: list[KnowledgeRecord], layout: dict, layout_
                 "planning_bucket": record.planning_bucket,
                 "due_at": record.due_at,
                 "focus_rank": record.focus_rank,
+                "export_selected": record.record_id in export_selected_set,
             }
             for record in filtered_task_records
         ],
     }
 
     drag_result = execution_dnd_board(component_payload, key="execution_dnd_surface")
-    if isinstance(drag_result, dict) and drag_result.get("action") in {"move_task", "add_block", "remove_block", "rename_day", "rename_week"}:
+    if isinstance(drag_result, dict) and drag_result.get("action") in {"move_task", "add_block", "remove_block", "rename_day", "rename_week", "toggle_export", "toggle_export_many", "move_block"}:
         event_id = str(drag_result.get("event_id", "")).strip()
         if event_id and st.session_state.get("last_execution_drag_event") == event_id:
             drag_result = None
         elif event_id:
             st.session_state["last_execution_drag_event"] = event_id
+    if isinstance(drag_result, dict) and drag_result.get("action") == "toggle_export":
+        record_id = str(drag_result.get("record_id", "")).strip()
+        if record_id:
+            toggle_export_selection(export_selection_path, record_id)
+            st.rerun()
+    if isinstance(drag_result, dict) and drag_result.get("action") == "toggle_export_many":
+        record_ids = [str(item).strip() for item in drag_result.get("record_ids", []) if str(item).strip()]
+        if record_ids:
+            current = set(load_export_selection(export_selection_path))
+            all_selected = all(record_id in current for record_id in record_ids)
+            next_ids = [record_id for record_id in current if record_id not in set(record_ids)] if all_selected else sorted(current | set(record_ids))
+            set_export_selection(export_selection_path, next_ids)
+            st.rerun()
     if isinstance(drag_result, dict) and drag_result.get("action") == "move_task":
         record_id = str(drag_result.get("record_id", "")).strip()
         planning_bucket = str(drag_result.get("planning_bucket", "")).strip()
@@ -2162,6 +2517,30 @@ def render_execution_graph(records: list[KnowledgeRecord], layout: dict, layout_
                 history_path,
                 "Blokk törölve, a taskok aznapi Mindenképp blokkba kerültek.",
             )
+    if isinstance(drag_result, dict) and drag_result.get("action") == "move_block":
+        block_key = str(drag_result.get("block_key", "")).strip()
+        target_day_key = str(drag_result.get("target_day_key", "")).strip()
+        block_info = find_block(layout, block_key) if block_key else None
+        target_day = find_day(layout, target_day_key) if target_day_key else None
+        if block_info and target_day and block_info.get("lane") == "session" and block_info.get("day_key") != target_day_key:
+            updated_records = [
+                update_record(record, due_at=target_day.get("date"))
+                if record.planning_bucket == block_key
+                else record
+                for record in records
+            ]
+            persist_layout_and_records(
+                move_block_to_day(layout, block_key, target_day_key),
+                layout_path,
+                updated_records,
+                source_dir,
+                config,
+                records_path,
+                index_path,
+                chroma_dir,
+                history_path,
+                "Blokk áthelyezve másik napra, a tartalmával együtt.",
+            )
 
     known_bucket_keys = {bucket.get("key", "") for bucket in iter_buckets(layout)}
     orphan_tasks = [record for record in task_records if record.planning_bucket and record.planning_bucket not in known_bucket_keys]
@@ -2208,6 +2587,7 @@ def render_record_history(history_path, record_id: str, key_prefix: str = "histo
     for event in events[:30]:
         changed = ", ".join(event.get("changed_fields", [])) or "-"
         st.markdown(f"**{event.get('action_type', '-') }**  `{event.get('timestamp', '-')}`")
+        st.caption(f"{summarize_event(event)}")
         st.caption(f"forrás: {event.get('source', '-')} | mezők: {changed}")
         if event.get("movement"):
             movement = event["movement"]
@@ -2216,6 +2596,34 @@ def render_record_history(history_path, record_id: str, key_prefix: str = "histo
         after = event.get("after") or {}
         with st.expander("Részletek", expanded=False):
             st.write({"előtte": before, "utána": after})
+
+
+def render_global_history(history_path, records: list[KnowledgeRecord], records_path, source_dir, config, index_path, chroma_dir) -> None:
+    events = list(reversed(load_events(history_path)))
+    if not events:
+        st.info("Még nincs history esemény.")
+        return
+    st.markdown("**Globális history**")
+    selected_event_ids: list[str] = []
+    for event in events[:80]:
+        event_id = str(event.get("event_id", ""))
+        label = f"{event.get('timestamp', '-') } | {event.get('record_id', '-') } | {summarize_event(event)}"
+        if st.checkbox(label, key=f"global_history_{event_id}"):
+            selected_event_ids.append(event_id)
+    if selected_event_ids and st.button("Kijelölt események visszavonása", key="global_history_undo"):
+        record_lookup = {record.record_id: record for record in records}
+        for event in events:
+            if event.get("event_id") not in selected_event_ids:
+                continue
+            record_id = event.get("record_id")
+            before = event.get("before")
+            if record_id == "__export__":
+                continue
+            if before is None:
+                record_lookup.pop(record_id, None)
+            else:
+                record_lookup[record_id] = KnowledgeRecord.from_dict(before)
+        persist_records_bulk(list(record_lookup.values()), source_dir, config, records_path, index_path, chroma_dir, history_path, "Kijelölt history események visszavonva.")
 
 
 def inject_app_shell_css() -> None:
@@ -2317,6 +2725,8 @@ def app() -> None:
     chroma_dir = config.chroma_dir_for(source_dir)
     planning_layout_path = config.planning_layout_path_for(source_dir)
     history_events_path = config.history_events_path_for(source_dir)
+    export_selection_path = config.export_selection_path_for(source_dir)
+    export_dir = config.export_dir_for(source_dir)
     records = load_records(records_path)
     planning_layout = ensure_layout(planning_layout_path)
     planning_titles = planning_bucket_titles(planning_layout)
@@ -2326,6 +2736,7 @@ def app() -> None:
     existing_values = collect_existing_values(records)
     selected_record = get_selected_record(records)
     planning_options = planning_bucket_options(planning_layout, [record.planning_bucket for record in records])
+    export_selected_ids = load_export_selection(export_selection_path)
 
     st.sidebar.subheader("Privat tarak")
     st.sidebar.write(f"RAG-DB: `{source_dir}`")
@@ -2339,8 +2750,8 @@ def app() -> None:
         st.sidebar.write(record_label(selected_record))
         st.sidebar.caption(selected_record.record_id)
 
-    tab_execution, tab_mindmap, tab_kanban, tab_detail, tab_input, tab_table, tab_timeline, tab_search = st.tabs(
-        ["Execution Graph", "Context Graph", "Kanban", "Részlet", "Bevitel", "Táblázat", "GANTT", "Keresés"]
+    tab_execution, tab_mindmap, tab_kanban, tab_timeline, tab_archive, tab_detail, tab_input, tab_table, tab_export, tab_search = st.tabs(
+        ["Execution Graph", "Context Graph", "Kanban", "GANTT", "Archívum", "Részlet", "Bevitel", "Táblázat", "MD Export", "Keresés"]
     )
     inject_tab_bar_behavior()
 
@@ -2370,6 +2781,8 @@ def app() -> None:
                     graph_edges=create_values["graph_edges"],
                     decision_needed=create_values["decision_needed"],
                     decision_context=create_values["decision_context"],
+                    abbreviation=create_values["abbreviation"],
+                    icon=create_values["icon"],
                     start_at=create_values["start_at"],
                     due_at=create_values["due_at"],
                     deadline=create_values["deadline"],
@@ -2435,6 +2848,8 @@ def app() -> None:
                     graph_edges=edit_values["graph_edges"],
                     decision_needed=edit_values["decision_needed"],
                     decision_context=edit_values["decision_context"],
+                    abbreviation=edit_values["abbreviation"],
+                    icon=edit_values["icon"],
                     start_at=edit_values["start_at"],
                     due_at=edit_values["due_at"],
                     deadline=edit_values["deadline"],
@@ -2446,6 +2861,8 @@ def app() -> None:
                     focus_rank=edit_values["focus_rank"],
                 )
                 persist_record(with_synced_hierarchy_title(updated_record), source_dir, config, records_path, index_path, chroma_dir, history_events_path)
+            with st.expander("Globális history", expanded=False):
+                render_global_history(history_events_path, records, records_path, source_dir, config, index_path, chroma_dir)
 
     with tab_table:
         st.subheader("Tablazat nezet")
@@ -2475,6 +2892,12 @@ def app() -> None:
                 key="table_filter_planning_bucket",
             )
             filter_text = filter_col8.text_input("Altalanos szoveges szures", key="table_filter_text")
+            export_filter = st.selectbox(
+                "Export kijelölés",
+                options=["all", "selected", "unselected"],
+                format_func=lambda value: {"all": "Mindegy", "selected": "Kijelölt", "unselected": "Nem kijelölt"}[value],
+                key="table_filter_export",
+            )
 
             due_col1, due_col2 = st.columns(2)
             filter_due_from = due_col1.date_input(
@@ -2503,7 +2926,7 @@ def app() -> None:
             )
             table_sort_desc = sort_col2.checkbox("Csokkeno sorrend", value=True, key="table_sort_desc")
 
-            filtered_records = records
+            filtered_records = [record for record in records if record.status != "archived"]
             if filter_title.strip():
                 needle = filter_title.strip().lower()
                 filtered_records = [record for record in filtered_records if needle in record.title.lower()]
@@ -2559,6 +2982,14 @@ def app() -> None:
 
             rows = [record.to_table_row() for record in filtered_records]
             if rows:
+                export_selected_set = set(load_export_selection(export_selection_path))
+                for row in rows:
+                    row["export_selected"] = row["record_id"] in export_selected_set
+                if export_filter == "selected":
+                    rows = [row for row in rows if row["export_selected"]]
+                elif export_filter == "unselected":
+                    rows = [row for row in rows if not row["export_selected"]]
+            if rows:
                 st.caption("A tabla itt helyben szerkesztheto. A valtozasok az Alkalmaz gombbal irhatok vissza.")
                 table_df = pd.DataFrame(rows)
                 edited_df = st.data_editor(
@@ -2567,10 +2998,41 @@ def app() -> None:
                     hide_index=True,
                     key="records_table_editor",
                     disabled=["record_id", "created_at", "updated_at"],
+                    column_order=[
+                        "export_selected",
+                        "icon",
+                        "title",
+                        "abbreviation",
+                        "entity_type",
+                        "summary",
+                        "organization",
+                        "team",
+                        "project",
+                        "case",
+                        "status",
+                        "parent_id",
+                        "people",
+                        "tags",
+                        "decision_needed",
+                        "start_at",
+                        "due_at",
+                        "deadline",
+                        "event_at",
+                        "next_step",
+                        "next_step_estimate",
+                        "planning_bucket",
+                        "focus_rank",
+                        "created_at",
+                        "updated_at",
+                        "record_id",
+                    ],
                     column_config={
                         "entity_type": st.column_config.SelectboxColumn("entitas", options=ENTITY_OPTIONS, required=True),
                         "status": st.column_config.SelectboxColumn("statusz", options=STATUS_OPTIONS, required=True),
                         "decision_needed": st.column_config.CheckboxColumn("dontes?"),
+                        "abbreviation": st.column_config.TextColumn("rövidítés"),
+                        "icon": st.column_config.TextColumn("ikon"),
+                        "export_selected": st.column_config.CheckboxColumn("export"),
                         "planning_bucket": st.column_config.SelectboxColumn("tervezesi hely", options=planning_options),
                         "next_step": st.column_config.TextColumn("next step"),
                         "next_step_estimate": st.column_config.TextColumn("becsult ido"),
@@ -2590,11 +3052,14 @@ def app() -> None:
                         edited_rows = edited_df.to_dict("records")
                         updated_lookup = {}
                         changed_count = 0
+                        edited_export_ids: list[str] = []
                         for row in edited_rows:
                             record_id = normalize_table_value(row.get("record_id"))
                             existing = record_lookup.get(record_id)
                             if not existing:
                                 continue
+                            if bool(row.get("export_selected")):
+                                edited_export_ids.append(record_id)
                             updated = record_from_table_row(row, existing)
                             if updated.to_dict() != existing.to_dict():
                                 updated = update_record(updated, updated_at=utc_now_iso())
@@ -2604,8 +3069,10 @@ def app() -> None:
                         merged_records = [updated_lookup.get(record.record_id, record) for record in records]
                         merged_records = sync_hierarchy_renames(merged_records, record_lookup)
                         if changed_count == 0:
+                            set_export_selection(export_selection_path, edited_export_ids)
                             st.info("Nincs alkalmazando tablazatmodositas.")
                         else:
+                            set_export_selection(export_selection_path, edited_export_ids)
                             persist_records_bulk(
                                 merged_records,
                                 source_dir,
@@ -2663,13 +3130,24 @@ def app() -> None:
             kanban_project = filter_col1.text_input("Projekt", key="kanban_filter_project")
             kanban_org = filter_col2.text_input("Munkahely / organization", key="kanban_filter_org")
             kanban_status = filter_col3.selectbox("Státusz", [NONE_OPTION] + STATUS_OPTIONS, key="kanban_filter_status")
-            kanban_entity = filter_col4.selectbox("Entitás", [NONE_OPTION, "task", "case", "project"], key="kanban_filter_entity")
-            filter_col5, filter_col6, filter_col7 = st.columns(3)
+            kanban_entities = filter_col4.multiselect(
+                "Entitás",
+                options=["task", "case", "project"],
+                default=st.session_state.get("kanban_filter_entities", []),
+                key="kanban_filter_entities",
+            )
+            filter_col5, filter_col6, filter_col7, filter_col8 = st.columns(4)
             kanban_due_from = filter_col5.date_input("Due - tól", value=st.session_state.get("kanban_filter_due_from"), key="kanban_filter_due_from")
             kanban_due_to = filter_col6.date_input("Due - ig", value=st.session_state.get("kanban_filter_due_to"), key="kanban_filter_due_to")
             kanban_text = filter_col7.text_input("Szöveges szűrés", key="kanban_filter_text")
+            kanban_due_presence = filter_col8.selectbox(
+                "Van due?",
+                options=["all", "has", "missing"],
+                format_func=lambda value: {"all": "Mindegy", "has": "Van", "missing": "Nincs"}[value],
+                key="kanban_due_presence",
+            )
 
-        task_like = [record for record in records if record.entity_type in {"task", "case", "project"}]
+        task_like = [record for record in records if record.status != "archived" and record.entity_type in {"task", "case", "project"}]
         if kanban_project.strip():
             needle = kanban_project.strip().lower()
             task_like = [record for record in task_like if needle in record.project.lower()]
@@ -2678,8 +3156,12 @@ def app() -> None:
             task_like = [record for record in task_like if needle in record.organization.lower()]
         if kanban_status != NONE_OPTION:
             task_like = [record for record in task_like if record.status == kanban_status]
-        if kanban_entity != NONE_OPTION:
-            task_like = [record for record in task_like if record.entity_type == kanban_entity]
+        if kanban_entities:
+            task_like = [record for record in task_like if record.entity_type in kanban_entities]
+        if kanban_due_presence == "has":
+            task_like = [record for record in task_like if record.due_at]
+        elif kanban_due_presence == "missing":
+            task_like = [record for record in task_like if not record.due_at]
         if kanban_due_from:
             due_from_iso = kanban_due_from.isoformat()
             task_like = [record for record in task_like if record.due_at and record.due_at >= due_from_iso]
@@ -2696,8 +3178,10 @@ def app() -> None:
         if not task_like:
             st.info("A jelenlegi szűrőkkel nincs megjeleníthető kanban elem.")
         else:
+            st.session_state["export_visible_ids"] = [record.record_id for record in task_like]
+            export_selected_set = set(export_selected_ids)
             kanban_payload = {
-                "statuses": [{"key": status, "title": STATUS_LABELS.get(status, status)} for status in STATUS_OPTIONS],
+                "statuses": [{"key": status, "title": STATUS_LABELS.get(status, status)} for status in STATUS_OPTIONS if status != "archived"],
                 "items": [
                     {
                         "record_id": record.record_id,
@@ -2705,26 +3189,198 @@ def app() -> None:
                         "status": record.status,
                         "entity_type": record.entity_type,
                         "project": record.project,
+                        "export_selected": record.record_id in export_selected_set,
                     }
                     for record in task_like
                 ],
             }
             kanban_result = kanban_dnd_board(kanban_payload, key="kanban_dnd_surface")
-            if isinstance(kanban_result, dict) and kanban_result.get("action") == "move_status":
+            if isinstance(kanban_result, dict) and kanban_result.get("action") in {"toggle_export", "move_status"}:
                 event_id = str(kanban_result.get("event_id", "")).strip()
-                if event_id and st.session_state.get("last_kanban_drag_event") != event_id:
+                if event_id and st.session_state.get("last_kanban_drag_event") == event_id:
+                    kanban_result = None
+                elif event_id:
                     st.session_state["last_kanban_drag_event"] = event_id
-                    record_id = str(kanban_result.get("record_id", "")).strip()
-                    new_status = str(kanban_result.get("status", "")).strip()
-                    moved_record = next((record for record in task_like if record.record_id == record_id), None)
-                    if moved_record and new_status and new_status != moved_record.status:
-                        persist_record(update_record(moved_record, status=new_status), source_dir, config, records_path, index_path, chroma_dir, history_events_path)
+            if isinstance(kanban_result, dict) and kanban_result.get("action") == "toggle_export":
+                record_id = str(kanban_result.get("record_id", "")).strip()
+                if record_id:
+                    toggle_export_selection(export_selection_path, record_id)
+                    st.rerun()
+            if isinstance(kanban_result, dict) and kanban_result.get("action") == "move_status":
+                record_id = str(kanban_result.get("record_id", "")).strip()
+                new_status = str(kanban_result.get("status", "")).strip()
+                moved_record = next((record for record in task_like if record.record_id == record_id), None)
+                if moved_record and new_status and new_status != moved_record.status:
+                    persist_record(update_record(moved_record, status=new_status), source_dir, config, records_path, index_path, chroma_dir, history_events_path)
 
     with tab_timeline:
-        render_gantt_view(records)
+        render_gantt_view(records, export_selection_path, source_dir, config, records_path, index_path, chroma_dir, history_events_path)
+
+    with tab_archive:
+        st.subheader("Archívum")
+        archived_records = [record for record in records if record.status == "archived"]
+        if not archived_records:
+            st.info("Még nincs archivált rekord.")
+        else:
+            st.caption("Az archivált rekordok kikerülnek a fő operatív nézetekből, de a RAG és a keresés továbbra is láthatja őket kontextusként.")
+            archive_pick = st.selectbox(
+                "Archivált rekord",
+                options=[record.record_id for record in archived_records],
+                format_func=lambda record_id: record_label(next(record for record in archived_records if record.record_id == record_id)),
+                key="archive_record_picker",
+            )
+            restore_status = st.selectbox(
+                "Visszaállítás ide",
+                options=["inbox", "next", "active", "waiting"],
+                key="archive_restore_status",
+            )
+            action_col1, action_col2 = st.columns(2)
+            if action_col1.button("Megnyit részletben", key="archive_open_detail"):
+                st.session_state["selected_record_id"] = archive_pick
+                st.rerun()
+            if action_col2.button("Visszahozás", key="archive_restore"):
+                selected_archived = next((record for record in archived_records if record.record_id == archive_pick), None)
+                if selected_archived:
+                    persist_record(
+                        update_record(selected_archived, status=restore_status),
+                        source_dir,
+                        config,
+                        records_path,
+                        index_path,
+                        chroma_dir,
+                        history_events_path,
+                    )
+
+    with tab_export:
+        st.subheader("MD Export")
+        export_lookup = {record.record_id: record for record in records}
+        current_export_ids = [record_id for record_id in load_export_selection(export_selection_path) if record_id in export_lookup]
+        visible_export_ids = [record_id for record_id in st.session_state.get("export_visible_ids", []) if record_id in export_lookup]
+        export_col1, export_col2, export_col3, export_col4, export_col5 = st.columns(5)
+        if export_col1.button("Collect Export", key="collect_export"):
+            st.session_state["md_export_collected_ids"] = current_export_ids
+        if export_col2.button("Select in view", key="md_export_select_in_view"):
+            current_export_ids = set_export_selection(export_selection_path, sorted(set(current_export_ids) | set(visible_export_ids)))
+            st.rerun()
+        if export_col3.button("Deselect in view", key="md_export_deselect_in_view"):
+            current_export_ids = set_export_selection(export_selection_path, [record_id for record_id in current_export_ids if record_id not in set(visible_export_ids)])
+            st.rerun()
+        if export_col4.button("Select all", key="md_export_select_all"):
+            current_export_ids = set_export_selection(export_selection_path, [record.record_id for record in records])
+            st.rerun()
+        if export_col5.button("Deselect all", key="md_export_deselect_all"):
+            current_export_ids = set_export_selection(export_selection_path, [])
+            st.rerun()
+
+        collected_ids = [record_id for record_id in st.session_state.get("md_export_collected_ids", current_export_ids) if record_id in export_lookup]
+        if not collected_ids:
+            st.info("Még nincs exportálásra kijelölt node.")
+        else:
+            st.caption(f"Jelenleg kijelölve: {len(collected_ids)} elem")
+            filter_col1, filter_col2 = st.columns(2)
+            export_filter_text = filter_col1.text_input("Lista szűrés", key="md_export_filter_text")
+            export_filter_entity = filter_col2.multiselect(
+                "Lista típus-szűrés",
+                options=ENTITY_OPTIONS,
+                default=st.session_state.get("md_export_filter_entity", []),
+                key="md_export_filter_entity",
+            )
+            display_ids = collected_ids
+            if export_filter_text.strip():
+                needle = export_filter_text.strip().lower()
+                display_ids = [record_id for record_id in display_ids if needle in export_lookup[record_id].title.lower()]
+            if export_filter_entity:
+                display_ids = [record_id for record_id in display_ids if export_lookup[record_id].entity_type in export_filter_entity]
+
+            updated_selection = list(current_export_ids)
+            active_export_ids: list[str] = []
+            for record_id in display_ids:
+                record = export_lookup[record_id]
+                row_col1, row_col2, row_col3 = st.columns([6, 1.2, 1.2])
+                row_col1.write(record_label(record))
+                export_now = row_col2.checkbox(
+                    "Export",
+                    value=True,
+                    key=f"md_export_now_{record_id}",
+                )
+                keep_in_list = record_id in current_export_ids
+                if row_col3.button("Törlés", key=f"md_export_remove_{record_id}"):
+                    updated_selection = [item for item in updated_selection if item != record_id]
+                    current_export_ids = set_export_selection(export_selection_path, updated_selection)
+                    st.rerun()
+                if export_now and keep_in_list:
+                    active_export_ids.append(record_id)
+            if updated_selection != current_export_ids:
+                current_export_ids = set_export_selection(export_selection_path, updated_selection)
+
+            selected_records = [export_lookup[record_id] for record_id in active_export_ids if record_id in export_lookup]
+            st.divider()
+            option_col1, option_col2 = st.columns(2)
+            include_relations = option_col1.checkbox("Kapcsolatokkal együtt", value=False, key="md_export_include_relations")
+            apply_children_all = option_col2.checkbox("Minden sor: gyerekekkel", value=True, key="md_export_apply_children_all")
+            export_format = st.selectbox(
+                "Kimenet",
+                options=["obsidian", "blocks"],
+                format_func=lambda value: {"obsidian": "Teljes, struktúrált Obsidian MD", "blocks": "Csak blokkok, hierarchikusan"}.get(value, value),
+                key="md_export_format",
+            )
+
+            include_children_by_id: dict[str, bool] = {}
+            include_parents_by_id: dict[str, bool] = {}
+            include_notes_by_id: dict[str, bool] = {}
+            st.markdown("**Export sorok**")
+            for record in selected_records:
+                row_col1, row_col2, row_col3, row_col4 = st.columns([6, 1, 1, 1.4])
+                row_col1.write(record_label(record))
+                include_children_by_id[record.record_id] = row_col2.checkbox("gy", value=apply_children_all, key=f"md_row_children_{record.record_id}")
+                include_parents_by_id[record.record_id] = row_col3.checkbox("sz", value=False, key=f"md_row_parents_{record.record_id}")
+                include_notes_by_id[record.record_id] = row_col4.checkbox("Jegyzet", value=True, key=f"md_row_notes_{record.record_id}")
+
+            scope_records = export_record_scope(
+                records,
+                [record.record_id for record in selected_records],
+                include_children=any(include_children_by_id.values()),
+                include_parents=any(include_parents_by_id.values()),
+                include_relations=include_relations,
+            )
+            default_filename = export_filename_suggestion(selected_records)
+            file_name = st.text_input("Fájlnév", value=st.session_state.get("md_export_filename", default_filename) or default_filename, key="md_export_filename")
+
+            rendered_markdown = render_markdown_obsidian(scope_records, records, include_notes_by_id, include_children_by_id, include_parents_by_id) if export_format == "obsidian" else render_markdown_blocks(scope_records)
+            st.markdown("**Előnézet**")
+            st.code(rendered_markdown, language="markdown")
+
+            if st.button("MD export mentése", key="md_export_save"):
+                export_dir.mkdir(parents=True, exist_ok=True)
+                export_path = export_dir / (file_name.strip() or default_filename)
+                if export_path.suffix.lower() != ".md":
+                    export_path = export_path.with_suffix(".md")
+                export_path.write_text(rendered_markdown, encoding="utf-8")
+                append_event(
+                    history_events_path,
+                    {
+                        "event_id": f"export-{utc_now_iso()}",
+                        "timestamp": utc_now_iso(),
+                        "record_id": "__export__",
+                        "action_type": "export",
+                        "source": "md_export",
+                        "changed_fields": [],
+                        "before": None,
+                        "after": {
+                            "path": str(export_path),
+                            "format": export_format,
+                            "record_ids": [record.record_id for record in selected_records],
+                            "include_children": include_children_by_id,
+                            "include_parents": include_parents_by_id,
+                            "include_relations": include_relations,
+                            "include_notes": include_notes_by_id,
+                        },
+                    },
+                )
+                st.success(f"Markdown export mentve: {export_path}")
 
     with tab_execution:
-        render_execution_graph(records, planning_layout, planning_layout_path, source_dir, config, records_path, index_path, chroma_dir, history_events_path)
+        render_execution_graph(records, planning_layout, planning_layout_path, source_dir, config, records_path, index_path, chroma_dir, history_events_path, export_selection_path, export_selected_ids)
 
     with tab_mindmap:
         st.subheader("Context Graph")
@@ -2791,6 +3447,7 @@ def app() -> None:
                 context_due_to,
             )
             visible_graph_records = expand_context_graph_with_ancestors(records, filtered_graph_records)
+            st.session_state["export_visible_ids"] = [record.record_id for record in visible_graph_records]
 
             if not filtered_graph_records:
                 st.info("A szurok mellett nincs megjelenitheto rekord.")
@@ -2813,9 +3470,10 @@ def app() -> None:
                             show_only_hierarchy,
                             graph_mode,
                             st.session_state.get("context_graph_force_fit_token", ""),
+                            export_selected_ids,
                         )
                         graph_result = context_graph(graph_payload, key="context_graph_surface")
-                        if isinstance(graph_result, dict) and graph_result.get("action") in {"select_node", "reparent_node"}:
+                        if isinstance(graph_result, dict) and graph_result.get("action") in {"select_node", "reparent_node", "toggle_export"}:
                             event_id = str(graph_result.get("event_id", "")).strip()
                             if not event_id or st.session_state.get("last_context_graph_event") != event_id:
                                 if event_id:
@@ -2824,6 +3482,11 @@ def app() -> None:
                                     record_id = str(graph_result.get("record_id", "")).strip()
                                     if record_id and record_id in {record.record_id for record in records}:
                                         st.session_state["context_graph_selected_record_id"] = record_id
+                                        st.rerun()
+                                if graph_result.get("action") == "toggle_export":
+                                    record_id = str(graph_result.get("record_id", "")).strip()
+                                    if record_id:
+                                        toggle_export_selection(export_selection_path, record_id)
                                         st.rerun()
                                 if graph_result.get("action") == "reparent_node":
                                     moved_id = str(graph_result.get("record_id", "")).strip()
@@ -2888,6 +3551,8 @@ def app() -> None:
                                         graph_edges=edit_values["graph_edges"],
                                         decision_needed=edit_values["decision_needed"],
                                         decision_context=edit_values["decision_context"],
+                                        abbreviation=edit_values["abbreviation"],
+                                        icon=edit_values["icon"],
                                         start_at=edit_values["start_at"],
                                         due_at=edit_values["due_at"],
                                         deadline=edit_values["deadline"],

@@ -251,6 +251,31 @@ def add_block(layout: dict, day_key: str, title: str, lane: str = "session") -> 
     return layout
 
 
+def move_block_to_day(layout: dict, block_key: str, target_day_key: str) -> dict:
+    moved_block: dict | None = None
+    source_day_key = ""
+    for week in layout.get("weeks", []):
+        for day in week.get("days", []):
+            if day.get("key") == target_day_key:
+                continue
+            kept_blocks: list[dict] = []
+            for block in day.get("blocks", []):
+                if block.get("key") == block_key:
+                    moved_block = dict(block)
+                    source_day_key = day.get("key", "")
+                else:
+                    kept_blocks.append(block)
+            day["blocks"] = kept_blocks
+    if not moved_block or source_day_key == target_day_key:
+        return layout
+    for week in layout.get("weeks", []):
+        for day in week.get("days", []):
+            if day.get("key") == target_day_key:
+                day.setdefault("blocks", []).append(moved_block)
+                return layout
+    return layout
+
+
 def remove_week(layout: dict, week_key: str) -> dict:
     layout["weeks"] = [week for week in layout.get("weeks", []) if week.get("key") != week_key]
     return layout

@@ -12,6 +12,8 @@ BACKUP_DIRNAME = "backups"
 HISTORY_DIRNAME = "history"
 PLANNING_LAYOUT_FILENAME = "planning_layout.json"
 HISTORY_EVENTS_FILENAME = "events.jsonl"
+EXPORT_SELECTION_FILENAME = "export_selection.json"
+EXPORT_DIRNAME = "exports"
 DEFAULT_EMBED_MODEL = "nomic-embed-text"
 
 
@@ -60,6 +62,12 @@ class AppConfig:
 
     def history_events_path_for(self, source_dir: Path) -> Path:
         return self.history_dir_for(source_dir) / HISTORY_EVENTS_FILENAME
+
+    def export_selection_path_for(self, source_dir: Path) -> Path:
+        return self.app_dir_for(source_dir) / EXPORT_SELECTION_FILENAME
+
+    def export_dir_for(self, source_dir: Path) -> Path:
+        return self.app_dir_for(source_dir) / EXPORT_DIRNAME
 
 
 def load_config(project_root: Path | None = None) -> AppConfig:

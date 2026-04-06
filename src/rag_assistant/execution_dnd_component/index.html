@@ -308,6 +308,11 @@
         color: #b91c1c;
         border-color: #fecaca;
       }
+      .mini-btn.export-on {
+        background: #eff6ff;
+        border-color: #93c5fd;
+        color: #1d4ed8;
+      }
       @media (max-width: 980px) {
         body {
           height: auto;
@@ -344,6 +349,7 @@
 
       let latestPayload = null;
       let dragRecordId = null;
+      let dragBlockId = null;
 
       function postMessageToStreamlit(type, data) {
         window.parent.postMessage({ isStreamlitMessage: true, type, ...data }, "*");
@@ -385,6 +391,10 @@
           },
           dataType: "json",
         });
+      }
+
+      function sendValue(payload) {
+        sendAction(payload);
       }
 
       function restoreScrollPositions() {
@@ -433,6 +443,24 @@
             if (recordId && targetBucket) {
               sendMove(recordId, targetBucket);
             }
+          });
+        });
+        app.querySelectorAll("[data-drop-day-key]").forEach(targetEl => {
+          targetEl.addEventListener("dragover", event => {
+            if (!dragBlockId) return;
+            event.preventDefault();
+            targetEl.classList.add("drag-over");
+          });
+          targetEl.addEventListener("dragleave", () => targetEl.classList.remove("drag-over"));
+          targetEl.addEventListener("drop", event => {
+            if (!dragBlockId) return;
+            event.preventDefault();
+            targetEl.classList.remove("drag-over");
+            const targetDayKey = targetEl.dataset.dropDayKey || "";
+            if (dragBlockId && targetDayKey) {
+              sendAction({ action: "move_block", block_key: dragBlockId, target_day_key: targetDayKey });
+            }
+            dragBlockId = null;
           });
         });
       }
@@ -527,6 +555,20 @@
           taskByBucket.get(bucket).push(task);
         });
 
+        function bucketTaskIds(bucket) {
+          const sourceKeys = (bucket.alias_keys && bucket.alias_keys.length ? bucket.alias_keys : [bucket.key]).filter(Boolean);
+          return sourceKeys.flatMap(key => (taskByBucket.get(key) || []).map(task => task.record_id));
+        }
+
+        function exportIcon(recordIds) {
+          const ids = [...new Set((recordIds || []).filter(Boolean))];
+          if (!ids.length) return { label: "◎", className: "" };
+          const selected = ids.filter(recordId => tasks.some(task => task.record_id === recordId && task.export_selected));
+          if (!selected.length) return { label: "◎", className: "" };
+          if (selected.length === ids.length) return { label: "◉", className: "export-on" };
+          return { label: "◐", className: "export-on" };
+        }
+
         const topNote = `
           <div class="top-note">
             <div>Task mozgatasa: fogd meg a kartyat es dobd egy masik blokkba.</div>
@@ -539,31 +581,48 @@
         }
 
         function renderTreeBlocks(day) {
-          return (day.blocks || []).map(bucket => `
-            <div class="tree-drop" ${bucket.droppable === false ? `` : `data-bucket-key="${escapeHtml(bucket.drop_target_key || bucket.key)}"`}>
-              <div style="display:flex;align-items:center;justify-content:space-between;gap:8px;"><span>${escapeHtml(bucket.title)}</span>${bucket.lane === "session" ? `<button class="mini-btn danger" data-remove-block="${escapeHtml(bucket.key)}">×</button>` : ``}</div>
+          const dayTaskIds = (day.blocks || []).flatMap(bucket => bucketTaskIds(bucket));
+          const dayExport = exportIcon(dayTaskIds);
+          return `
+            <div style="display:flex;align-items:center;gap:8px;margin-bottom:8px;">
+              <button class="mini-btn ${dayExport.className}" data-toggle-export-many="${escapeHtml(dayTaskIds.join(','))}" draggable="false">${dayExport.label}</button>
+              ${(day.source_day_key || day.key) !== "__unscheduled__" ? `<button class="mini-btn" data-add-block-day="${escapeHtml(day.source_day_key || day.key || "")}" draggable="false">+</button>` : ``}
+              <span style="font-size:12px;color:#64748b;">Nap export / blokk hozzáadás</span>
             </div>
-          `).join("");
+          ` + (day.blocks || []).map(bucket => {
+            const bucketIds = bucketTaskIds(bucket);
+            const bucketExport = exportIcon(bucketIds);
+            return `
+            <div class="tree-drop" ${bucket.droppable === false ? `` : `data-bucket-key="${escapeHtml(bucket.drop_target_key || bucket.key)}"`} ${bucket.lane === "session" ? `draggable="true" data-block-id="${escapeHtml(bucket.key)}"` : ``}>
+              <div style="display:flex;align-items:center;justify-content:space-between;gap:8px;">
+                <span>${escapeHtml(bucket.title)}</span>
+                <span style="display:flex;align-items:center;gap:6px;">
+                  <button class="mini-btn ${bucketExport.className}" data-toggle-export-many="${escapeHtml(bucketIds.join(','))}" draggable="false">${bucketExport.label}</button>
+                  ${bucket.lane === "session" ? `<button class="mini-btn" data-move-block="${escapeHtml(bucket.key)}" data-source-day-key="${escapeHtml(bucket.source_day_key || day.source_day_key || day.key || "")}" draggable="false">⇄</button><button class="mini-btn danger" data-remove-block="${escapeHtml(bucket.key)}" draggable="false">×</button>` : ``}
+                </span>
+              </div>
+            </div>
+          `}).join("");
         }
 
         function renderTreeDay(day, compact = false, hideTitle = false) {
           if (compact) {
             return `
               <div class="tree-day">
-                ${hideTitle ? `` : `<div style="display:flex;align-items:center;gap:8px;margin-bottom:6px;"><span class="tree-link" data-anchor-target="anchor-${escapeHtml(day.key || day.title)}" style="font-weight:700;">${escapeHtml(day.title)}</span>${day.key !== "__unscheduled__" ? `<button class="mini-btn" data-add-block-day="${escapeHtml(day.key || "")}">+</button><button class="mini-btn" data-rename-day="${escapeHtml(day.key || "")}" data-current-title="${escapeHtml(day.title || "")}">✎</button>` : ``}</div>`}
+                ${hideTitle ? `` : `<div style="display:flex;align-items:center;gap:8px;margin-bottom:6px;"><span class="tree-link" data-anchor-target="anchor-${escapeHtml(day.key || day.title)}" style="font-weight:700;">${escapeHtml(day.title)}</span>${(day.source_day_key || day.key) !== "__unscheduled__" ? `<button class="mini-btn" data-add-block-day="${escapeHtml(day.source_day_key || day.key || "")}" draggable="false">+</button><button class="mini-btn" data-rename-day="${escapeHtml(day.source_day_key || day.key || "")}" data-current-title="${escapeHtml(day.title || "")}" draggable="false">✎</button>` : ``}</div>`}
                 <div class="tree-section">${renderTreeBlocks(day)}</div>
               </div>
             `;
           }
           return `
             <details class="tree tree-day" data-tree-id="tree-day-${escapeHtml(day.key || day.title)}" ${openAttr(`tree-day-${day.key || day.title}`)}>
-              <summary>
+              <summary data-drop-day-key="${escapeHtml(day.source_day_key || day.key || "")}">
                 <button class="toggle" type="button" aria-label="Nyitas-zaras"></button>
                 <span class="tree-link" data-anchor-target="anchor-${escapeHtml(day.key || day.title)}">
                   <div class="day-title" style="font-size:14px;">${escapeHtml(day.title)}</div>
                   <div class="day-date">${escapeHtml(day.date || "")}</div>
                 </span>
-                ${day.key !== "__unscheduled__" ? `<button class="mini-btn" data-add-block-day="${escapeHtml(day.key || "")}">+</button><button class="mini-btn" data-rename-day="${escapeHtml(day.key || "")}" data-current-title="${escapeHtml(day.title || "")}">✎</button>` : ``}
+                ${(day.source_day_key || day.key) !== "__unscheduled__" ? `<button class="mini-btn" data-add-block-day="${escapeHtml(day.source_day_key || day.key || "")}" draggable="false">+</button><button class="mini-btn" data-rename-day="${escapeHtml(day.source_day_key || day.key || "")}" data-current-title="${escapeHtml(day.title || "")}" draggable="false">✎</button>` : ``}
               </summary>
               <div class="tree-section">${renderTreeBlocks(day)}</div>
             </details>
@@ -571,6 +630,8 @@
         }
 
         function renderBoardDay(day, compact = false, hideTitle = false) {
+          const dayTaskIds = (day.blocks || []).flatMap(bucket => bucketTaskIds(bucket));
+          const dayExport = exportIcon(dayTaskIds);
           const blocks = (day.blocks || []).map(bucket => {
             const lane = bucket.lane || "session";
             const style = laneStyles[lane] || laneStyles.session;
@@ -588,18 +649,23 @@
             const taskMarkup = entries.length
               ? entries.map(task => `
                 <div class="task" draggable="true" data-record-id="${escapeHtml(task.record_id)}" style="--bucket-accent:${style.accent};">
-                  <div class="task-title">${escapeHtml(task.title)}</div>
+                  <div class="task-title" style="display:flex;align-items:center;justify-content:space-between;gap:8px;"><span>${escapeHtml(task.title)}</span><button class="mini-btn ${task.export_selected ? `export-on` : ``}" data-toggle-export="${escapeHtml(task.record_id)}" draggable="false">${task.export_selected ? `◉` : `◎`}</button></div>
                   <div class="task-meta">${escapeHtml(task.project || "-")} / ${escapeHtml(task.case_name || "-")}</div>
                   ${task.due_at ? `<div class="task-date">${escapeHtml(task.due_at)}</div>` : ``}
                 </div>
               `).join("")
               : `<div class="empty">Ures blokk</div>`;
+            const bucketIds = entries.map(task => task.record_id);
+            const bucketExport = exportIcon(bucketIds);
             return `
               <div class="bucket ${bucket.droppable === false ? `non-droppable` : ``}" ${bucket.droppable === false ? `` : `data-bucket-key="${escapeHtml(bucket.drop_target_key || bucket.key)}"`} style="--bucket-bg:${style.bg};--bucket-accent:${style.accent};">
                 <div class="bucket-header">
                   <div style="display:flex;align-items:center;justify-content:space-between;gap:8px;">
                     <div class="bucket-title">${escapeHtml(bucket.title)}</div>
-                    ${bucket.lane === "session" ? `<button class="mini-btn danger" data-remove-block="${escapeHtml(bucket.key)}">×</button>` : ``}
+                    <div style="display:flex;align-items:center;gap:6px;">
+                      <button class="mini-btn ${bucketExport.className}" data-toggle-export-many="${escapeHtml(bucketIds.join(','))}" draggable="false">${bucketExport.label}</button>
+                      ${bucket.lane === "session" ? `<button class="mini-btn" data-move-block="${escapeHtml(bucket.key)}" data-source-day-key="${escapeHtml(bucket.source_day_key || day.source_day_key || day.key || "")}" draggable="false">⇄</button><button class="mini-btn danger" data-remove-block="${escapeHtml(bucket.key)}" draggable="false">×</button>` : ``}
+                    </div>
                   </div>
                   ${hideTitle ? `` : `<div class="bucket-subtitle">${escapeHtml(day.title)}</div>`}
                 </div>
@@ -610,20 +676,21 @@
           if (compact) {
             return `
               <div class="day" id="anchor-${escapeHtml(day.key || day.title)}">
-                ${hideTitle ? `` : `<div style="display:flex;align-items:center;gap:8px;margin-bottom:10px;"><div class="day-title">${escapeHtml(day.title)}</div>${day.key !== "__unscheduled__" ? `<button class="mini-btn" data-add-block-day="${escapeHtml(day.key || "")}">+</button><button class="mini-btn" data-rename-day="${escapeHtml(day.key || "")}" data-current-title="${escapeHtml(day.title || "")}">✎</button>` : ``}</div>`}
+                ${hideTitle ? `` : `<div style="display:flex;align-items:center;gap:8px;margin-bottom:10px;"><div class="day-title">${escapeHtml(day.title)}</div><button class="mini-btn ${dayExport.className}" data-toggle-export-many="${escapeHtml(dayTaskIds.join(','))}" draggable="false">${dayExport.label}</button>${(day.source_day_key || day.key) !== "__unscheduled__" ? `<button class="mini-btn" data-add-block-day="${escapeHtml(day.source_day_key || day.key || "")}" draggable="false">+</button><button class="mini-btn" data-rename-day="${escapeHtml(day.source_day_key || day.key || "")}" data-current-title="${escapeHtml(day.title || "")}" draggable="false">✎</button>` : ``}</div>`}
                 <div class="blocks">${blocks}</div>
               </div>
             `;
           }
           return `
             <details class="tree day" data-tree-id="board-day-${escapeHtml(day.key || day.title)}" ${openAttr(`board-day-${day.key || day.title}`)}>
-              <summary class="day-header" id="anchor-${escapeHtml(day.key || day.title)}">
+              <summary class="day-header" id="anchor-${escapeHtml(day.key || day.title)}" data-drop-day-key="${escapeHtml(day.source_day_key || day.key || "")}">
                 <button class="toggle" type="button" aria-label="Nyitas-zaras"></button>
                 <span>
                   <div class="day-title">${escapeHtml(day.title)}</div>
                   <div class="day-date">${escapeHtml(day.date || "")}</div>
                 </span>
-                ${day.key !== "__unscheduled__" ? `<button class="mini-btn" data-add-block-day="${escapeHtml(day.key || "")}">+</button><button class="mini-btn" data-rename-day="${escapeHtml(day.key || "")}" data-current-title="${escapeHtml(day.title || "")}">✎</button>` : ``}
+                <button class="mini-btn ${dayExport.className}" data-toggle-export-many="${escapeHtml(dayTaskIds.join(','))}" draggable="false">${dayExport.label}</button>
+                ${(day.source_day_key || day.key) !== "__unscheduled__" ? `<button class="mini-btn" data-add-block-day="${escapeHtml(day.source_day_key || day.key || "")}" draggable="false">+</button><button class="mini-btn" data-rename-day="${escapeHtml(day.source_day_key || day.key || "")}" data-current-title="${escapeHtml(day.title || "")}" draggable="false">✎</button>` : ``}
               </summary>
               <div class="section-body"><div class="blocks">${blocks}</div></div>
             </details>
@@ -736,6 +803,50 @@
             dragRecordId = null;
             taskEl.classList.remove("dragging");
             app.querySelectorAll(".drag-over").forEach(node => node.classList.remove("drag-over"));
+          });
+        });
+        app.querySelectorAll("[data-block-id]").forEach(blockEl => {
+          blockEl.addEventListener("dragstart", event => {
+            dragBlockId = blockEl.dataset.blockId || "";
+            event.dataTransfer.setData("text/plain", dragBlockId || "");
+            event.dataTransfer.effectAllowed = "move";
+          });
+          blockEl.addEventListener("dragend", () => {
+            dragBlockId = null;
+            app.querySelectorAll(".drag-over").forEach(node => node.classList.remove("drag-over"));
+          });
+        });
+        app.querySelectorAll("[data-toggle-export]").forEach(button => {
+          button.addEventListener("mousedown", event => { event.preventDefault(); event.stopPropagation(); });
+          button.addEventListener("click", event => {
+            event.preventDefault();
+            event.stopPropagation();
+            const recordId = button.dataset.toggleExport || "";
+            if (recordId) {
+              sendValue({ action: "toggle_export", event_id: `${Date.now()}-${Math.random().toString(16).slice(2)}`, record_id: recordId });
+            }
+          });
+        });
+        app.querySelectorAll("[data-toggle-export-many]").forEach(button => {
+          button.addEventListener("mousedown", event => { event.preventDefault(); event.stopPropagation(); });
+          button.addEventListener("click", event => {
+            event.preventDefault();
+            event.stopPropagation();
+            const recordIds = (button.dataset.toggleExportMany || "").split(",").map(item => item.trim()).filter(Boolean);
+            if (recordIds.length) {
+              sendValue({ action: "toggle_export_many", event_id: `${Date.now()}-${Math.random().toString(16).slice(2)}`, record_ids: recordIds });
+            }
+          });
+        });
+        app.querySelectorAll("[data-move-block]").forEach(button => {
+          button.addEventListener("click", event => {
+            event.preventDefault();
+            event.stopPropagation();
+            const blockKey = button.dataset.moveBlock || "";
+            const targetDayKey = window.prompt("Melyik nap key-jére menjen a blokk?", button.dataset.sourceDayKey || "");
+            if (blockKey && targetDayKey && targetDayKey.trim()) {
+              sendAction({ action: "move_block", block_key: blockKey, target_day_key: targetDayKey.trim() });
+            }
           });
         });
 
