@@ -7,6 +7,7 @@ import json
 import re
 import subprocess
 from pathlib import Path
+import hashlib
 
 import pandas as pd
 import streamlit as st
@@ -2707,16 +2708,18 @@ def render_record_history(history_path, record_id: str, key_prefix: str = "histo
             st.write({"előtte": before, "utána": after})
 
 
-def render_global_history(history_path, records: list[KnowledgeRecord], records_path, source_dir, config, index_path, chroma_dir) -> None:
+def render_global_history(history_path, records: list[KnowledgeRecord], records_path, source_dir, config, index_path, chroma_dir, key_namespace: str = "") -> None:
     raw_events = load_events(history_path)
     events = list(reversed(raw_events))
     if not events:
         st.info("Még nincs history esemény.")
         return
+    ns = str(key_namespace or "")
+    key_suffix = hashlib.sha1((str(history_path) + "|" + ns).encode("utf-8")).hexdigest()[:8]
     st.markdown("**Globális history**")
     actionable_events = [event for event in events if event.get("record_id") != "__export__"]
     action_col1, action_col2 = st.columns(2)
-    if action_col1.button("Undo utolsó lépés", key="global_history_undo_last") and actionable_events:
+    if action_col1.button("Undo utolsó lépés", key=f"global_history_undo_last_{key_suffix}") and actionable_events:
         latest_event = actionable_events[0]
         updated_records = apply_history_snapshot(raw_events, [str(latest_event.get("event_id", ""))], records)
         redo_stack = list(st.session_state.get("history_redo_stack", []))
@@ -2724,7 +2727,7 @@ def render_global_history(history_path, records: list[KnowledgeRecord], records_
         st.session_state["history_redo_stack"] = redo_stack[-20:]
         persist_records_bulk(updated_records, source_dir, config, records_path, index_path, chroma_dir, history_path, "Utolsó lépés visszavonva.")
     redo_stack = list(st.session_state.get("history_redo_stack", []))
-    if action_col2.button("Redo", key="global_history_redo_last", disabled=not redo_stack):
+    if action_col2.button("Redo", key=f"global_history_redo_last_{key_suffix}", disabled=not redo_stack):
         redo_event = redo_stack.pop()
         st.session_state["history_redo_stack"] = redo_stack
         updated_records = apply_history_future(raw_events, [str(redo_event.get("event_id", ""))], records)
@@ -2733,9 +2736,9 @@ def render_global_history(history_path, records: list[KnowledgeRecord], records_
     for event in events[:80]:
         event_id = str(event.get("event_id", ""))
         label = f"{event.get('timestamp', '-') } | {event.get('record_id', '-') } | {summarize_event(event)}"
-        if st.checkbox(label, key=f"global_history_{event_id}"):
+        if st.checkbox(label, key=f"global_history_{key_suffix}_{event_id}"):
             selected_event_ids.append(event_id)
-    if selected_event_ids and st.button("Kijelölt események visszavonása", key="global_history_undo"):
+    if selected_event_ids and st.button("Kijelölt események visszavonása", key=f"global_history_undo_{key_suffix}"):
         updated_records = apply_history_snapshot(raw_events, selected_event_ids, records)
         persist_records_bulk(updated_records, source_dir, config, records_path, index_path, chroma_dir, history_path, "Kijelölt history események visszavonva.")
 
@@ -2989,7 +2992,7 @@ def app() -> None:
                 )
                 persist_record(with_synced_hierarchy_title(updated_record), source_dir, config, records_path, index_path, chroma_dir, history_events_path)
             with st.expander("Globális history", expanded=False):
-                render_global_history(history_events_path, records, records_path, source_dir, config, index_path, chroma_dir)
+                render_global_history(history_events_path, records, records_path, source_dir, config, index_path, chroma_dir, key_namespace=f"detail_{selected_record.record_id}")
 
     with tab_table:
         st.subheader("Tablazat nezet")
@@ -3382,7 +3385,7 @@ def app() -> None:
 
     with tab_history:
         st.subheader("History")
-        render_global_history(history_events_path, records, records_path, source_dir, config, index_path, chroma_dir)
+        render_global_history(history_events_path, records, records_path, source_dir, config, index_path, chroma_dir, key_namespace="tab_history")
 
     with tab_export:
         st.subheader("MD Export")
