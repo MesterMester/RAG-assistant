@@ -6,12 +6,15 @@
     <style>
       html, body { height: 100%; }
       body { margin: 0; padding: 12px; font-family: Georgia, "Times New Roman", serif; background: linear-gradient(180deg,#fffefb,#f8fafc); overflow: hidden; }
-      .board-wrap { overflow: auto; padding-bottom: 8px; max-height: calc(100vh - 24px); }
+      #app { height: calc(100vh - 24px); min-height: 0; }
+      .board-wrap { overflow: auto; padding-bottom: 8px; height: 100%; min-height: 0; }
       .board { display: grid; grid-template-columns: repeat(7, minmax(180px, 1fr)) 160px; gap: 12px; min-width: 1520px; }
-      .col { border: 1px solid #e2e8f0; border-radius: 18px; background: rgba(255,255,255,0.88); min-height: 280px; max-height: calc(100vh - 72px); padding: 10px; overflow-y: auto; position: relative; }
+      .col { border: 1px solid #e2e8f0; border-radius: 18px; background: rgba(255,255,255,0.88); min-height: 280px; height: calc(100vh - 56px); overflow: hidden; position: relative; display: flex; flex-direction: column; }
       .col.drag-over { border-color: #0f172a; background: #fff7ed; }
-      .head { font-weight: 700; margin: -10px -10px 10px -10px; position: sticky; top: -10px; background: rgba(255,255,255,0.98); z-index: 5; padding: 10px 10px 8px 10px; border-bottom: 1px solid #e2e8f0; }
-      .card { background: white; border-left: 4px solid #334155; border-radius: 14px; padding: 10px 12px; box-shadow: 0 4px 14px rgba(15,23,42,0.08); margin-bottom: 8px; cursor: grab; }
+      .head { font-weight: 700; background: rgba(255,255,255,0.98); z-index: 8; padding: 10px 12px 8px 12px; border-bottom: 1px solid #e2e8f0; flex: 0 0 auto; }
+      .col-body { padding: 10px; overflow-y: auto; overflow-x: hidden; min-height: 0; flex: 1 1 auto; }
+      .card { background: white; border-left: 4px solid #334155; border-radius: 14px; padding: 10px 12px; box-shadow: 0 4px 14px rgba(15,23,42,0.08); margin-bottom: 8px; cursor: grab; user-select: none; -webkit-user-drag: element; }
+      .card.selected { outline: 2px solid #0f172a; outline-offset: 2px; box-shadow: 0 10px 22px rgba(15,23,42,0.16); }
       .card.dragging { opacity: 0.45; }
       .meta { color: #64748b; font-size: 12px; margin-top: 2px; }
       .empty { color: #94a3b8; font-size: 12px; border: 1px dashed #cbd5e1; border-radius: 12px; padding: 10px; }
@@ -24,16 +27,70 @@
     <div id="app"></div>
     <script>
       let dragRecordId = null;
+      const scrollKey = "kanban_board_scroll_left";
+      const scrollTopKey = "kanban_board_scroll_top";
+      const columnScrollPrefix = "kanban_col_scroll_";
       function post(type, data) { window.parent.postMessage({ isStreamlitMessage: true, type, ...data }, "*"); }
-      function setHeight() { post("streamlit:setFrameHeight", { height: document.documentElement.scrollHeight || 600 }); }
+      function setHeight() {
+        const desktopHeight = Math.max(680, Math.min(window.innerHeight - 24, 980));
+        const mobileHeight = document.documentElement.scrollHeight || document.body.scrollHeight || 900;
+        const height = window.innerWidth <= 980 ? mobileHeight : desktopHeight;
+        post("streamlit:setFrameHeight", { height });
+      }
       function sendValue(value) { post("streamlit:setComponentValue", { value, dataType: "json" }); }
       function esc(value) { return String(value ?? "").replaceAll("&","&amp;").replaceAll("<","&lt;").replaceAll(">","&gt;").replaceAll('"',"&quot;"); }
+      function closestColumn(element) { return element && typeof element.closest === "function" ? element.closest(".col") : null; }
+      function markColumn(column) {
+        document.querySelectorAll(".col").forEach(col => col.classList.remove("drag-over"));
+        if (column) column.classList.add("drag-over");
+      }
+      function sendAction(value) { sendValue({ ...value, event_id: value.event_id || `${Date.now()}-${Math.random().toString(16).slice(2)}` }); }
+      function persistScroll() {
+        const wrap = document.querySelector(".board-wrap");
+        if (wrap) {
+          sessionStorage.setItem(scrollKey, String(wrap.scrollLeft));
+          sessionStorage.setItem(scrollTopKey, String(wrap.scrollTop));
+        }
+        document.querySelectorAll(".col").forEach(col => {
+          const status = col.dataset.status || "";
+          const body = col.querySelector(".col-body");
+          if (status && body) sessionStorage.setItem(`${columnScrollPrefix}${status}`, String(body.scrollTop));
+        });
+      }
+      function restoreScroll() {
+        const wrap = document.querySelector(".board-wrap");
+        if (!wrap) return;
+        wrap.scrollLeft = Number(sessionStorage.getItem(scrollKey) || 0);
+        wrap.scrollTop = Number(sessionStorage.getItem(scrollTopKey) || 0);
+        document.querySelectorAll(".col").forEach(col => {
+          const status = col.dataset.status || "";
+          const body = col.querySelector(".col-body");
+          if (status && body) body.scrollTop = Number(sessionStorage.getItem(`${columnScrollPrefix}${status}`) || 0);
+        });
+      }
+      function attachScrollPersistence() {
+        const wrap = document.querySelector(".board-wrap");
+        if (!wrap) return;
+        wrap.addEventListener("scroll", () => {
+          sessionStorage.setItem(scrollKey, String(wrap.scrollLeft));
+          sessionStorage.setItem(scrollTopKey, String(wrap.scrollTop));
+        });
+        document.querySelectorAll(".col").forEach(col => {
+          const status = col.dataset.status || "";
+          const body = col.querySelector(".col-body");
+          if (!status || !body) return;
+          body.addEventListener("scroll", () => {
+            sessionStorage.setItem(`${columnScrollPrefix}${status}`, String(body.scrollTop));
+          });
+        });
+      }
       window.addEventListener("message", event => {
         const message = event.data;
         if (!message || message.type !== "streamlit:render") return;
         const payload = message.args.payload || {};
         const statuses = payload.statuses || [];
         const items = payload.items || [];
+        const selectedRecordId = payload.selected_record_id || "";
         const byStatus = new Map();
         items.forEach(item => {
           const key = item.status || "inbox";
@@ -43,45 +100,111 @@
         const html = `<div class="board-wrap"><div class="board">` + statuses.map(status => {
           const cards = (byStatus.get(status.key) || []).map(item => `
             <div class="card" draggable="true" data-record-id="${esc(item.record_id)}">
-              <div style="display:flex;align-items:center;justify-content:space-between;gap:8px;"><span>${esc(item.title)}</span><button class="mini-btn" data-toggle-export="${esc(item.record_id)}">${item.export_selected ? "◉" : "◎"}</button></div>
+              <div style="display:flex;align-items:center;justify-content:space-between;gap:8px;"><span>${esc(item.title)}</span><button class="mini-btn" type="button" data-toggle-export="${esc(item.record_id)}">${item.export_selected ? "◉" : "◎"}</button></div>
               <div class="meta">${esc(item.entity_type)} / ${esc(item.project || "-")}</div>
+              ${item.next_step ? `<div class="meta">🥾 ${esc(item.next_step)}</div>` : ``}
+              ${item.next_step_estimate ? `<div class="meta">⏱️ ${esc(item.next_step_estimate)}</div>` : ``}
             </div>
           `).join("") || `<div class="empty">Nincs elem</div>`;
-          return `<div class="col" data-status="${esc(status.key)}"><div class="head">${esc(status.title)}</div>${cards}</div>`;
-        }).join("") + `<div class="col archive-col" data-status="archived"><div class="head">Archiválás</div><div class="empty">Ide dobva az elem kikerül a fő nézetekből, de az Archívumban visszahozható marad.</div></div></div></div>`;
+          return `<div class="col" data-status="${esc(status.key)}"><div class="head">${esc(status.title)}</div><div class="col-body">${cards}</div></div>`;
+        }).join("") + `<div class="col archive-col" data-status="archived"><div class="head">Archiválás</div><div class="col-body"><div class="empty">Ide dobva az elem kikerül a fő nézetekből, de az Archívumban visszahozható marad.</div></div></div></div></div>`;
         const app = document.getElementById("app");
         app.innerHTML = html;
         app.querySelectorAll(".card").forEach(card => {
-          card.addEventListener("dragstart", e => { dragRecordId = card.dataset.recordId; card.classList.add("dragging"); e.dataTransfer.setData("text/plain", dragRecordId || ""); });
-          card.addEventListener("dragend", () => { dragRecordId = null; card.classList.remove("dragging"); app.querySelectorAll(".col").forEach(col => col.classList.remove("drag-over")); });
-        });
-        app.querySelectorAll("[data-toggle-export]").forEach(button => {
-          button.addEventListener("mousedown", e => { e.preventDefault(); e.stopPropagation(); });
-          button.addEventListener("click", e => {
-            e.preventDefault();
-            e.stopPropagation();
-            const recordId = button.dataset.toggleExport || "";
+          card.addEventListener("click", e => {
+            const button = e.target && typeof e.target.closest === "function" ? e.target.closest("[data-toggle-export]") : null;
+            if (button) return;
+            const recordId = card.dataset.recordId || "";
             if (recordId) {
-              sendValue({ action: "toggle_export", event_id: `${Date.now()}-${Math.random().toString(16).slice(2)}`, record_id: recordId });
+              persistScroll();
+              sendAction({ action: "select_record", record_id: recordId });
             }
           });
-        });
-        app.querySelectorAll(".col").forEach(col => {
-          col.addEventListener("dragover", e => { e.preventDefault(); col.classList.add("drag-over"); });
-          col.addEventListener("dragleave", () => col.classList.remove("drag-over"));
-          col.addEventListener("drop", e => {
+          card.addEventListener("dragstart", e => {
+            if (e.target && typeof e.target.closest === "function" && e.target.closest("[data-toggle-export]")) {
+              e.preventDefault();
+              return;
+            }
+            dragRecordId = card.dataset.recordId;
+            card.classList.add("dragging");
+            e.dataTransfer.effectAllowed = "move";
+            e.dataTransfer.setData("text/plain", dragRecordId || "");
+          });
+          card.addEventListener("dragend", () => { dragRecordId = null; card.classList.remove("dragging"); app.querySelectorAll(".col").forEach(col => col.classList.remove("drag-over")); });
+          card.addEventListener("dragover", e => {
             e.preventDefault();
-            col.classList.remove("drag-over");
+            markColumn(closestColumn(card));
+          });
+          card.addEventListener("drop", e => {
+            e.preventDefault();
+            const col = closestColumn(card);
+            if (!col) return;
+            markColumn(null);
             const recordId = dragRecordId || e.dataTransfer.getData("text/plain");
             const status = col.dataset.status || "";
             if (recordId && status) {
-              sendValue({ action: "move_status", event_id: `${Date.now()}-${Math.random().toString(16).slice(2)}`, record_id: recordId, status });
+              sendAction({ action: "move_status", record_id: recordId, status });
             }
           });
         });
+        app.addEventListener("click", e => {
+          const button = e.target && typeof e.target.closest === "function" ? e.target.closest("[data-toggle-export]") : null;
+          if (!button) return;
+          e.preventDefault();
+          e.stopPropagation();
+          persistScroll();
+          const recordId = button.dataset.toggleExport || "";
+          if (recordId) sendAction({ action: "toggle_export", record_id: recordId });
+        });
+        app.addEventListener("mousedown", e => {
+          const button = e.target && typeof e.target.closest === "function" ? e.target.closest("[data-toggle-export]") : null;
+          if (!button) return;
+          e.preventDefault();
+          e.stopPropagation();
+        });
+        app.querySelectorAll(".col").forEach(col => {
+          col.addEventListener("dragover", e => { e.preventDefault(); markColumn(col); });
+          col.addEventListener("dragleave", e => {
+            if (!col.contains(e.relatedTarget)) col.classList.remove("drag-over");
+          });
+          col.addEventListener("drop", e => {
+            e.preventDefault();
+            markColumn(null);
+            const recordId = dragRecordId || e.dataTransfer.getData("text/plain");
+            const status = col.dataset.status || "";
+            if (recordId && status) {
+              persistScroll();
+              sendAction({ action: "move_status", record_id: recordId, status });
+            }
+          });
+        });
+        restoreScroll();
+        if (selectedRecordId) {
+          const selectedCard = app.querySelector(`.card[data-record-id="${CSS.escape(selectedRecordId)}"]`);
+          if (selectedCard) {
+            selectedCard.classList.add("selected");
+            const col = selectedCard.closest(".col");
+            const body = col ? col.querySelector(".col-body") : null;
+            const wrap = document.querySelector(".board-wrap");
+            if (body) {
+              const desiredTop = Math.max(0, selectedCard.offsetTop - 80);
+              if (selectedCard.offsetTop < body.scrollTop + 40 || selectedCard.offsetTop > body.scrollTop + body.clientHeight - 120) {
+                body.scrollTo({ top: desiredTop, behavior: "smooth" });
+              }
+            }
+            if (wrap && col) {
+              const left = col.offsetLeft - 40;
+              if (col.offsetLeft < wrap.scrollLeft || col.offsetLeft > wrap.scrollLeft + wrap.clientWidth - col.clientWidth) {
+                wrap.scrollTo({ left: Math.max(0, left), behavior: "smooth" });
+              }
+            }
+          }
+        }
+        attachScrollPersistence();
         setTimeout(setHeight, 0);
       });
       window.addEventListener("load", () => { post("streamlit:componentReady", { apiVersion: 1 }); setHeight(); });
+      window.addEventListener("resize", () => setHeight());
     </script>
   </body>
 </html>

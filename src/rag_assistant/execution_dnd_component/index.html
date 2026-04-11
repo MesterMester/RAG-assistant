@@ -230,6 +230,11 @@
         padding: 10px 12px;
         cursor: grab;
       }
+      .task.selected {
+        outline: 2px solid #0f172a;
+        outline-offset: 2px;
+        box-shadow: 0 10px 22px rgba(15, 23, 42, 0.16);
+      }
       .task.dragging {
         opacity: 0.45;
       }
@@ -241,6 +246,17 @@
       .task-meta {
         font-size: 12px;
         color: var(--muted);
+      }
+      .task-step {
+        margin-top: 6px;
+        font-size: 12px;
+        color: #1e3a8a;
+        font-weight: 700;
+      }
+      .task-estimate {
+        margin-top: 4px;
+        font-size: 12px;
+        color: #334155;
       }
       .task-date {
         display: inline-flex;
@@ -397,11 +413,36 @@
         sendAction(payload);
       }
 
+      function estimateLabel(totalMinutes) {
+        if (!totalMinutes) return "";
+        const hours = Math.floor(totalMinutes / 60);
+        const minutes = totalMinutes % 60;
+        if (hours && minutes) return `Összesen: ${totalMinutes}p (${hours}:${String(minutes).padStart(2, "0")})`;
+        if (hours) return `Összesen: ${totalMinutes}p (${hours}:00)`;
+        return `Összesen: ${totalMinutes}p`;
+      }
+
       function restoreScrollPositions() {
         const treePane = document.querySelector(".tree-pane");
         const boardPane = document.querySelector(".board-pane");
         if (treePane) treePane.scrollTop = Number(sessionStorage.getItem("execution_tree_scroll") || 0);
         if (boardPane) boardPane.scrollTop = Number(sessionStorage.getItem("execution_board_scroll") || 0);
+      }
+
+      function scrollSelectedTaskIntoView(app, selectedRecordId) {
+        if (!selectedRecordId) return;
+        const taskEl = app.querySelector(`.task[data-record-id="${CSS.escape(selectedRecordId)}"]`);
+        if (!taskEl) return;
+        taskEl.classList.add("selected");
+        const boardPane = document.querySelector(".board-pane");
+        if (!boardPane) return;
+        const taskTop = taskEl.offsetTop;
+        const viewTop = boardPane.scrollTop;
+        const viewBottom = viewTop + boardPane.clientHeight;
+        const targetTop = Math.max(0, taskTop - 96);
+        if (taskTop < viewTop + 40 || taskTop > viewBottom - 120) {
+          boardPane.scrollTo({ top: targetTop, behavior: "smooth" });
+        }
       }
 
       function readTreeOpenState() {
@@ -560,6 +601,15 @@
           return sourceKeys.flatMap(key => (taskByBucket.get(key) || []).map(task => task.record_id));
         }
 
+        function bucketTasks(bucket) {
+          const sourceKeys = (bucket.alias_keys && bucket.alias_keys.length ? bucket.alias_keys : [bucket.key]).filter(Boolean);
+          return sourceKeys.flatMap(key => taskByBucket.get(key) || []);
+        }
+
+        function bucketEstimateMinutes(bucket) {
+          return bucketTasks(bucket).reduce((sum, task) => sum + (Number(task.estimate_minutes) || 0), 0);
+        }
+
         function exportIcon(recordIds) {
           const ids = [...new Set((recordIds || []).filter(Boolean))];
           if (!ids.length) return { label: "◎", className: "" };
@@ -592,11 +642,13 @@
           ` + (day.blocks || []).map(bucket => {
             const bucketIds = bucketTaskIds(bucket);
             const bucketExport = exportIcon(bucketIds);
+            const totalEstimate = bucketEstimateMinutes(bucket);
             return `
             <div class="tree-drop" ${bucket.droppable === false ? `` : `data-bucket-key="${escapeHtml(bucket.drop_target_key || bucket.key)}"`} ${bucket.lane === "session" ? `draggable="true" data-block-id="${escapeHtml(bucket.key)}"` : ``}>
               <div style="display:flex;align-items:center;justify-content:space-between;gap:8px;">
                 <span>${escapeHtml(bucket.title)}</span>
                 <span style="display:flex;align-items:center;gap:6px;">
+                  ${totalEstimate ? `<span style="font-size:11px;color:#475569;">${escapeHtml(estimateLabel(totalEstimate))}</span>` : ``}
                   <button class="mini-btn ${bucketExport.className}" data-toggle-export-many="${escapeHtml(bucketIds.join(','))}" draggable="false">${bucketExport.label}</button>
                   ${bucket.lane === "session" ? `<button class="mini-btn" data-move-block="${escapeHtml(bucket.key)}" data-source-day-key="${escapeHtml(bucket.source_day_key || day.source_day_key || day.key || "")}" draggable="false">⇄</button><button class="mini-btn danger" data-remove-block="${escapeHtml(bucket.key)}" draggable="false">×</button>` : ``}
                 </span>
@@ -606,10 +658,12 @@
         }
 
         function renderTreeDay(day, compact = false, hideTitle = false) {
+          const includeFocus = Boolean(day.include_main_focus_total);
+          const computedDayTotal = (day.blocks || []).reduce((sum, bucket) => sum + bucketEstimateMinutes(bucket), 0) + (includeFocus ? (taskByBucket.get("main_focus") || []).reduce((sum, task) => sum + (Number(task.estimate_minutes) || 0), 0) : 0);
           if (compact) {
             return `
               <div class="tree-day">
-                ${hideTitle ? `` : `<div style="display:flex;align-items:center;gap:8px;margin-bottom:6px;"><span class="tree-link" data-anchor-target="anchor-${escapeHtml(day.key || day.title)}" style="font-weight:700;">${escapeHtml(day.title)}</span>${(day.source_day_key || day.key) !== "__unscheduled__" ? `<button class="mini-btn" data-add-block-day="${escapeHtml(day.source_day_key || day.key || "")}" draggable="false">+</button><button class="mini-btn" data-rename-day="${escapeHtml(day.source_day_key || day.key || "")}" data-current-title="${escapeHtml(day.title || "")}" draggable="false">✎</button>` : ``}</div>`}
+                ${hideTitle ? `` : `<div style="display:flex;align-items:center;gap:8px;margin-bottom:6px;"><span class="tree-link" data-anchor-target="anchor-${escapeHtml(day.key || day.title)}" style="font-weight:700;">${escapeHtml(day.title)}</span>${computedDayTotal ? `<span style="font-size:11px;color:#475569;">${escapeHtml(estimateLabel(computedDayTotal))}</span>` : ``}${(day.source_day_key || day.key) !== "__unscheduled__" ? `<button class="mini-btn" data-add-block-day="${escapeHtml(day.source_day_key || day.key || "")}" draggable="false">+</button><button class="mini-btn" data-rename-day="${escapeHtml(day.source_day_key || day.key || "")}" data-current-title="${escapeHtml(day.title || "")}" draggable="false">✎</button>` : ``}</div>`}
                 <div class="tree-section">${renderTreeBlocks(day)}</div>
               </div>
             `;
@@ -620,7 +674,7 @@
                 <button class="toggle" type="button" aria-label="Nyitas-zaras"></button>
                 <span class="tree-link" data-anchor-target="anchor-${escapeHtml(day.key || day.title)}">
                   <div class="day-title" style="font-size:14px;">${escapeHtml(day.title)}</div>
-                  <div class="day-date">${escapeHtml(day.date || "")}</div>
+                  <div class="day-date">${escapeHtml(day.date || "")}${computedDayTotal ? ` | ${escapeHtml(estimateLabel(computedDayTotal))}` : ``}</div>
                 </span>
                 ${(day.source_day_key || day.key) !== "__unscheduled__" ? `<button class="mini-btn" data-add-block-day="${escapeHtml(day.source_day_key || day.key || "")}" draggable="false">+</button><button class="mini-btn" data-rename-day="${escapeHtml(day.source_day_key || day.key || "")}" data-current-title="${escapeHtml(day.title || "")}" draggable="false">✎</button>` : ``}
               </summary>
@@ -632,6 +686,7 @@
         function renderBoardDay(day, compact = false, hideTitle = false) {
           const dayTaskIds = (day.blocks || []).flatMap(bucket => bucketTaskIds(bucket));
           const dayExport = exportIcon(dayTaskIds);
+          const dayTotal = (day.blocks || []).reduce((sum, bucket) => sum + bucketEstimateMinutes(bucket), 0) + (day.include_main_focus_total ? (taskByBucket.get("main_focus") || []).reduce((sum, task) => sum + (Number(task.estimate_minutes) || 0), 0) : 0);
           const blocks = (day.blocks || []).map(bucket => {
             const lane = bucket.lane || "session";
             const style = laneStyles[lane] || laneStyles.session;
@@ -651,12 +706,15 @@
                 <div class="task" draggable="true" data-record-id="${escapeHtml(task.record_id)}" style="--bucket-accent:${style.accent};">
                   <div class="task-title" style="display:flex;align-items:center;justify-content:space-between;gap:8px;"><span>${escapeHtml(task.title)}</span><button class="mini-btn ${task.export_selected ? `export-on` : ``}" data-toggle-export="${escapeHtml(task.record_id)}" draggable="false">${task.export_selected ? `◉` : `◎`}</button></div>
                   <div class="task-meta">${escapeHtml(task.project || "-")} / ${escapeHtml(task.case_name || "-")}</div>
+                  ${task.next_step ? `<div class="task-step">🥾 ${escapeHtml(task.next_step)}</div>` : ``}
+                  ${task.next_step_estimate ? `<div class="task-estimate">⏱️ ${escapeHtml(task.next_step_estimate)}</div>` : ``}
                   ${task.due_at ? `<div class="task-date">${escapeHtml(task.due_at)}</div>` : ``}
                 </div>
               `).join("")
               : `<div class="empty">Ures blokk</div>`;
             const bucketIds = entries.map(task => task.record_id);
             const bucketExport = exportIcon(bucketIds);
+            const totalEstimate = entries.reduce((sum, task) => sum + (Number(task.estimate_minutes) || 0), 0);
             return `
               <div class="bucket ${bucket.droppable === false ? `non-droppable` : ``}" ${bucket.droppable === false ? `` : `data-bucket-key="${escapeHtml(bucket.drop_target_key || bucket.key)}"`} style="--bucket-bg:${style.bg};--bucket-accent:${style.accent};">
                 <div class="bucket-header">
@@ -667,7 +725,7 @@
                       ${bucket.lane === "session" ? `<button class="mini-btn" data-move-block="${escapeHtml(bucket.key)}" data-source-day-key="${escapeHtml(bucket.source_day_key || day.source_day_key || day.key || "")}" draggable="false">⇄</button><button class="mini-btn danger" data-remove-block="${escapeHtml(bucket.key)}" draggable="false">×</button>` : ``}
                     </div>
                   </div>
-                  ${hideTitle ? `` : `<div class="bucket-subtitle">${escapeHtml(day.title)}</div>`}
+                  <div class="bucket-subtitle">${escapeHtml([hideTitle ? `` : day.title, totalEstimate ? estimateLabel(totalEstimate) : ``].filter(Boolean).join(" | "))}</div>
                 </div>
                 <div class="task-list">${taskMarkup}</div>
               </div>
@@ -676,7 +734,7 @@
           if (compact) {
             return `
               <div class="day" id="anchor-${escapeHtml(day.key || day.title)}">
-                ${hideTitle ? `` : `<div style="display:flex;align-items:center;gap:8px;margin-bottom:10px;"><div class="day-title">${escapeHtml(day.title)}</div><button class="mini-btn ${dayExport.className}" data-toggle-export-many="${escapeHtml(dayTaskIds.join(','))}" draggable="false">${dayExport.label}</button>${(day.source_day_key || day.key) !== "__unscheduled__" ? `<button class="mini-btn" data-add-block-day="${escapeHtml(day.source_day_key || day.key || "")}" draggable="false">+</button><button class="mini-btn" data-rename-day="${escapeHtml(day.source_day_key || day.key || "")}" data-current-title="${escapeHtml(day.title || "")}" draggable="false">✎</button>` : ``}</div>`}
+                ${hideTitle ? `` : `<div style="display:flex;align-items:center;gap:8px;margin-bottom:10px;"><div class="day-title">${escapeHtml(day.title)}</div>${dayTotal ? `<span style="font-size:12px;color:#475569;">${escapeHtml(estimateLabel(dayTotal))}</span>` : ``}<button class="mini-btn ${dayExport.className}" data-toggle-export-many="${escapeHtml(dayTaskIds.join(','))}" draggable="false">${dayExport.label}</button>${(day.source_day_key || day.key) !== "__unscheduled__" ? `<button class="mini-btn" data-add-block-day="${escapeHtml(day.source_day_key || day.key || "")}" draggable="false">+</button><button class="mini-btn" data-rename-day="${escapeHtml(day.source_day_key || day.key || "")}" data-current-title="${escapeHtml(day.title || "")}" draggable="false">✎</button>` : ``}</div>`}
                 <div class="blocks">${blocks}</div>
               </div>
             `;
@@ -687,7 +745,7 @@
                 <button class="toggle" type="button" aria-label="Nyitas-zaras"></button>
                 <span>
                   <div class="day-title">${escapeHtml(day.title)}</div>
-                  <div class="day-date">${escapeHtml(day.date || "")}</div>
+                  <div class="day-date">${escapeHtml(day.date || "")}${dayTotal ? ` | ${escapeHtml(estimateLabel(dayTotal))}` : ``}</div>
                 </span>
                 <button class="mini-btn ${dayExport.className}" data-toggle-export-many="${escapeHtml(dayTaskIds.join(','))}" draggable="false">${dayExport.label}</button>
                 ${(day.source_day_key || day.key) !== "__unscheduled__" ? `<button class="mini-btn" data-add-block-day="${escapeHtml(day.source_day_key || day.key || "")}" draggable="false">+</button><button class="mini-btn" data-rename-day="${escapeHtml(day.source_day_key || day.key || "")}" data-current-title="${escapeHtml(day.title || "")}" draggable="false">✎</button>` : ``}
@@ -793,6 +851,14 @@
         `;
 
         app.querySelectorAll(".task").forEach(taskEl => {
+          taskEl.addEventListener("click", event => {
+            const button = event.target.closest(".mini-btn");
+            if (button) return;
+            const recordId = taskEl.dataset.recordId || "";
+            if (recordId) {
+              sendAction({ action: "select_record", record_id: recordId });
+            }
+          });
           taskEl.addEventListener("dragstart", event => {
             dragRecordId = taskEl.dataset.recordId;
             taskEl.classList.add("dragging");
@@ -854,6 +920,7 @@
         attachTreeInteractions(app);
         attachScrollPersistence();
         restoreScrollPositions();
+        scrollSelectedTaskIntoView(app, payload.selected_record_id || "");
 
         setTimeout(setFrameHeight, 0);
       }

@@ -107,8 +107,9 @@
       }
       .node {
         position: absolute;
-        width: 180px;
-        min-height: 74px;
+        min-width: 180px;
+        max-width: 360px;
+        min-height: 84px;
         padding: 10px 12px;
         border-radius: 18px;
         background: linear-gradient(180deg, rgba(255,255,255,0.98), rgba(255,255,255,0.88));
@@ -151,7 +152,7 @@
         padding-right: 18px;
       }
       .node.arrow {
-        clip-path: polygon(0 0, 82% 0, 100% 50%, 82% 100%, 0 100%, 8% 50%);
+        clip-path: polygon(0 0, 84% 0, 100% 50%, 84% 100%, 0 100%);
         padding-right: 22px;
       }
       .node.note {
@@ -178,6 +179,22 @@
         display: inline-flex;
         align-items: center;
         min-width: 0;
+        flex-wrap: wrap;
+        line-height: 1.25;
+        overflow-wrap: anywhere;
+      }
+      .node-title-main.level-0 { font-size: 23px; }
+      .node-title-main.level-1 { font-size: 20px; }
+      .node-title-main.level-2 { font-size: 17px; }
+      .node-title-main.level-3 { font-size: 14px; }
+      .node-extra {
+        margin-top: 6px;
+        font-size: 13px;
+        color: #0f172a;
+        font-weight: 700;
+        display: flex;
+        flex-wrap: wrap;
+        gap: 6px;
       }
       .toggle-btn {
         appearance: none;
@@ -216,7 +233,7 @@
       .shape.circle { border-radius: 999px; }
       .shape.diamond { transform: rotate(45deg); }
       .shape.hex { clip-path: polygon(25% 0%,75% 0%,100% 50%,75% 100%,25% 100%,0% 50%); }
-      .shape.arrow { clip-path: polygon(0 22%,68% 22%,68% 0,100% 50%,68% 100%,68% 78%,0 78%); }
+      .shape.arrow { clip-path: polygon(0 18%,72% 18%,72% 0,100% 50%,72% 100%,72% 82%,0 82%); }
       .shape.note { clip-path: polygon(0 0,100% 0,100% 78%,66% 78%,66% 100%,50% 78%,0 78%); }
       .shape.tab { clip-path: polygon(0 0,78% 0,78% 20%,100% 20%,100% 100%,0 100%); }
       .edge-hierarchy {
@@ -374,14 +391,27 @@
           .sort((a, b) => String(a.label || "").localeCompare(String(b.label || "")));
 
         const positions = new Map();
-        const nodeWidth = 180;
-        const nodeHeight = 92;
         const colGap = 120;
-        const rowGap = 44;
+        const rowGap = 72;
         const marginX = 36;
         const marginY = 24;
         const levelById = new Map();
         const visited = new Set();
+        const sizeById = new Map();
+        const levelWidths = new Map();
+
+        function estimateNodeSize(node) {
+          const label = String(node.label || "");
+          const nextBits = [node.next_step ? `🥾 ${node.next_step}` : "", node.next_step_estimate ? `⏱️ ${node.next_step_estimate}` : ""].filter(Boolean).join(" | ");
+          const longest = Math.max(label.length, nextBits.length, 18);
+          const width = Math.max(180, Math.min(360, 120 + longest * 6));
+          const lineChars = Math.max(18, Math.floor((width - 32) / 7));
+          const titleLines = Math.max(1, Math.ceil(label.length / lineChars));
+          const extraLines = nextBits ? Math.max(1, Math.ceil(nextBits.length / Math.max(20, lineChars - 4))) : 0;
+          const metaLines = Math.max(1, Math.ceil(((node.entity_type ? 1 : 0) + (node.status ? 1 : 0) + (node.due_at ? 1 : 0) + (node.has_note ? 1 : 0)) / 3));
+          const height = 66 + (titleLines - 1) * 20 + extraLines * 18 + metaLines * 16;
+          return { w: width, h: Math.max(92, height) };
+        }
 
         function sortedChildren(nodeId) {
           return (outgoing.get(nodeId) || [])
@@ -406,6 +436,20 @@
         nodes.forEach(node => {
           if (!levelById.has(node.id)) assignLevels(node.id, 0);
         });
+        nodes.forEach(node => {
+          const level = levelById.get(node.id) || 0;
+          const size = estimateNodeSize(node);
+          sizeById.set(node.id, size);
+          levelWidths.set(level, Math.max(levelWidths.get(level) || 0, size.w));
+        });
+
+        function xForLevel(level) {
+          let value = marginX;
+          for (let index = 0; index < level; index += 1) {
+            value += (levelWidths.get(index) || 180) + colGap;
+          }
+          return value;
+        }
 
         let cursorY = marginY;
         let maxLevel = 0;
@@ -418,20 +462,21 @@
           visited.add(nodeId);
           const level = levelById.get(nodeId) || 0;
           maxLevel = Math.max(maxLevel, level);
-          const x = marginX + level * (nodeWidth + colGap);
+          const size = sizeById.get(nodeId) || { w: 180, h: 92 };
+          const x = xForLevel(level);
           const children = sortedChildren(nodeId).filter(childId => !visited.has(childId));
 
           if (!children.length) {
             const y = cursorY;
-            positions.set(nodeId, { x, y, w: nodeWidth, h: nodeHeight });
-            cursorY += nodeHeight + rowGap;
-            return y + nodeHeight / 2;
+            positions.set(nodeId, { x, y, w: size.w, h: size.h });
+            cursorY += size.h + rowGap;
+            return y + size.h / 2;
           }
 
           const centers = children.map(childId => placeSubtree(childId));
           const centerY = centers.reduce((sum, value) => sum + value, 0) / Math.max(centers.length, 1);
-          const y = Math.max(marginY, centerY - nodeHeight / 2);
-          positions.set(nodeId, { x, y, w: nodeWidth, h: nodeHeight });
+          const y = Math.max(marginY, centerY - size.h / 2);
+          positions.set(nodeId, { x, y, w: size.w, h: size.h });
           return centerY;
         }
 
@@ -453,7 +498,7 @@
 
         return {
           positions,
-          width: Math.max(980, marginX * 2 + (maxLevel + 1) * (nodeWidth + colGap)),
+          width: Math.max(980, marginX + Array.from(levelWidths.values()).reduce((sum, width) => sum + width, 0) + (Math.max(0, maxLevel)) * colGap + 120),
           height: Math.max(720, maxY + 40),
         };
       }
@@ -467,13 +512,25 @@
         }
 
         const positions = new Map();
-        const nodeWidth = 180;
-        const nodeHeight = 92;
         const colGap = 120;
-        const rowGap = 44;
+        const rowGap = 72;
         const centerX = 760;
         const centerY = 520;
-        const minSubtreeHeight = nodeHeight + rowGap;
+        const sizeById = new Map();
+
+        function estimateNodeSize(node) {
+          const label = String(node.label || "");
+          const nextBits = [node.next_step ? `🥾 ${node.next_step}` : "", node.next_step_estimate ? `⏱️ ${node.next_step_estimate}` : ""].filter(Boolean).join(" | ");
+          const longest = Math.max(label.length, nextBits.length, 18);
+          const width = Math.max(180, Math.min(360, 120 + longest * 6));
+          const lineChars = Math.max(18, Math.floor((width - 32) / 7));
+          const titleLines = Math.max(1, Math.ceil(label.length / lineChars));
+          const extraLines = nextBits ? Math.max(1, Math.ceil(nextBits.length / Math.max(20, lineChars - 4))) : 0;
+          const metaLines = Math.max(1, Math.ceil(((node.entity_type ? 1 : 0) + (node.status ? 1 : 0) + (node.due_at ? 1 : 0) + (node.has_note ? 1 : 0)) / 3));
+          const height = 66 + (titleLines - 1) * 20 + extraLines * 18 + metaLines * 16;
+          return { w: width, h: Math.max(92, height) };
+        }
+        nodes.forEach(node => sizeById.set(node.id, estimateNodeSize(node)));
 
         function sortedChildren(nodeId) {
           return (outgoing.get(nodeId) || [])
@@ -488,16 +545,18 @@
         }
 
         function subtreeHeight(nodeId) {
+          const size = sizeById.get(nodeId) || { w: 180, h: 92 };
           const children = sortedChildren(nodeId);
-          if (!children.length) return minSubtreeHeight;
+          if (!children.length) return size.h + rowGap;
           const total = children.reduce((sum, childId) => sum + subtreeHeight(childId), 0);
-          return Math.max(minSubtreeHeight, total);
+          return Math.max(size.h + rowGap, total);
         }
 
         function placeDirectional(nodeId, depth, centerYPos, direction) {
-          const x = centerX + direction * depth * (nodeWidth + colGap) - nodeWidth / 2;
-          const y = centerYPos - nodeHeight / 2;
-          positions.set(nodeId, { x, y, w: nodeWidth, h: nodeHeight });
+          const size = sizeById.get(nodeId) || { w: 180, h: 92 };
+          const x = centerX + direction * depth * (Math.max(220, size.w) + colGap) - size.w / 2;
+          const y = centerYPos - size.h / 2;
+          positions.set(nodeId, { x, y, w: size.w, h: size.h });
           const children = sortedChildren(nodeId);
           if (!children.length) return;
           const heights = children.map(childId => subtreeHeight(childId));
@@ -511,7 +570,8 @@
         }
 
         if (centerId) {
-          positions.set(centerId, { x: centerX - nodeWidth / 2, y: centerY - nodeHeight / 2, w: nodeWidth, h: nodeHeight });
+          const centerSize = sizeById.get(centerId) || { w: 180, h: 92 };
+          positions.set(centerId, { x: centerX - centerSize.w / 2, y: centerY - centerSize.h / 2, w: centerSize.w, h: centerSize.h });
           const firstLevel = sortedChildren(centerId);
           const splitAt = Math.ceil(firstLevel.length / 2);
           const rightChildren = firstLevel.slice(0, splitAt);
@@ -643,10 +703,9 @@
 
           const nodeMarkup = nodes.map((node, index) => {
             const pos = layout.positions.get(node.id) || {
-              x: 36 + (index % 4) * 320,
-              y: 24 + Math.floor(index / 4) * 120,
-              w: 180,
-              h: 92,
+              x: 36 + (index % 4) * 360,
+              y: 24 + Math.floor(index / 4) * 160,
+              ...(payload.nodes || []).find(item => item.id === node.id)?.size || { w: 180, h: 92 },
             };
             const entityType = node.entity_type || (node.synthetic ? "synthetic" : "note");
             const accent = colorByEntity[entityType] || colorByEntity.synthetic;
@@ -654,6 +713,7 @@
             const shape = shapeByEntity[entityType] || "square";
             const childCount = (outgoing.get(node.id) || []).length;
             const isCollapsed = Boolean(collapsedState[node.id]);
+            const hierarchyLevel = Number(node.hierarchy_level ?? 3);
             const chips = [
               node.entity_type ? `<span class="chip">${escapeHtml(node.entity_type)}</span>` : ``,
               node.status ? `<span class="chip">${escapeHtml(node.status)}</span>` : ``,
@@ -665,15 +725,16 @@
                 class="node ${shape} ${node.synthetic ? `synthetic` : ``} ${selectedId === node.id ? `selected` : ``}"
                 data-node-id="${escapeHtml(node.id)}"
                 data-selectable="${node.synthetic ? `false` : `true`}"
-                style="left:${pos.x}px;top:${pos.y}px;--accent:${accent};--accent-soft:${soft};"
+                style="left:${pos.x}px;top:${pos.y}px;width:${pos.w}px;min-height:${pos.h}px;--accent:${accent};--accent-soft:${soft};"
               >
                 <div class="node-title">
-                  <span class="node-title-main"><span class="shape ${shape}" style="--accent:${accent};margin-right:8px;"></span>${node.icon ? `<span style="margin-right:6px;">${escapeHtml(node.icon)}</span>` : ``}${node.has_note ? `<span style="margin-right:6px;">🗒️</span>` : ``}${escapeHtml(node.label)}</span>
+                  <span class="node-title-main level-${Math.min(3, hierarchyLevel)}"><span class="shape ${shape}" style="--accent:${accent};margin-right:8px;"></span>${node.icon ? `<span style="margin-right:6px;">${escapeHtml(node.icon)}</span>` : ``}${node.has_note ? `<span style="margin-right:6px;">🗒️</span>` : ``}${escapeHtml(node.label)}</span>
                   <span style="display:flex;align-items:center;gap:6px;">
                     ${!node.synthetic ? `<button class="toggle-btn" type="button" data-toggle-export="${escapeHtml(node.id)}">${node.export_selected ? `◉` : `◎`}</button>` : ``}
                     ${childCount ? `<button class="toggle-btn" type="button" data-toggle-node="${escapeHtml(node.id)}">${isCollapsed ? `+` : `−`}</button>` : ``}
                   </span>
                 </div>
+                ${node.next_step || node.next_step_estimate ? `<div class="node-extra">${node.next_step ? `<span class="chip">🥾 ${escapeHtml(node.next_step)}</span>` : ``}${node.next_step_estimate ? `<span class="chip">⏱️ ${escapeHtml(node.next_step_estimate)}</span>` : ``}</div>` : ``}
                 <div class="node-meta">${chips}</div>
               </div>
             `;
