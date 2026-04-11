@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 from dataclasses import replace
-from datetime import date, timedelta
+from datetime import date, timedelta, datetime
 from html import escape
 import json
 import re
@@ -125,14 +125,18 @@ def set_export_selection(path: Path, record_ids: list[str]) -> list[str]:
 
 
 def export_filename_suggestion(records: list[KnowledgeRecord]) -> str:
+    # Default filename format: RAG-exp_YYMMDD-HH:MM:SS.md (editable by user)
+    now = datetime.now()
+    timestamp = now.strftime("%y%m%d-%H:%M:%S")
+    default = f"RAG-exp_{timestamp}.md"
     if not records:
-        return f"export-{date.today().isoformat()}.md"
+        return default
     title_bits = [re.sub(r"[^a-z0-9]+", "-", record.title.strip().lower()).strip("-") for record in records[:3]]
     title_bits = [bit for bit in title_bits if bit]
     base = "-".join(title_bits) or "export"
     if len(records) > 3:
         base += f"-plus-{len(records)-3}"
-    return f"{base}-{date.today().isoformat()}.md"
+    return f"{base}-{timestamp}.md"
 
 
 def thunderbird_record_id(preview: ThunderbirdMessagePreview) -> str:
@@ -1281,7 +1285,7 @@ def render_markdown_blocks(records: list[KnowledgeRecord]) -> str:
     lines: list[str] = []
 
     def walk(record: KnowledgeRecord, depth: int) -> None:
-        indent = "  " * depth
+        indent = "\t" * depth
         lines.append(f"{indent}{markdown_task_prefix(record)}{record.title}")
         for child in sort_items(children_by_parent.get(record.record_id, [])):
             walk(child, depth + 1)
@@ -1297,9 +1301,12 @@ def _format_markdown_note_lines(content: str, depth: int) -> list[str]:
         text = raw_line.rstrip()
         if not text.strip():
             continue
-        leading = len(raw_line) - len(raw_line.lstrip(" "))
-        extra_depth = leading // 2
-        indent = "  " * (depth + extra_depth)
+        m = re.match(r"^([ \t]*)", raw_line)
+        leading = m.group(1) if m else ""
+        tabs = leading.count("\t")
+        spaces = len(leading) - tabs
+        extra_depth = tabs + (spaces // 2)
+        indent = "\t" * (depth + extra_depth)
         lines.append(f"{indent}- {text.strip()}")
     return lines
 
@@ -1365,7 +1372,7 @@ def render_markdown_obsidian(records: list[KnowledgeRecord], all_records: list[K
         return f"- 🤖 | {body}"
 
     def walk(record: KnowledgeRecord, depth: int, allow_children: bool) -> None:
-        indent = "  " * depth
+        indent = "\t" * depth
         lines.append(f"{indent}{node_prefix(record)}")
         info_bits = [f"type: {record.entity_type}", f"status: {record.status}"]
         if record.start_at:
@@ -1381,14 +1388,14 @@ def render_markdown_obsidian(records: list[KnowledgeRecord], all_records: list[K
         place = place_path(record)
         if place:
             info_bits.append(f"place: {place}")
-        lines.append(f"{indent}  - ℹ️ | " + " | ".join(info_bits))
+        lines.append(f"{indent}\t- ℹ️ | " + " | ".join(info_bits))
         if include_notes_by_id.get(record.record_id, True) and record.content.strip():
-            lines.append(f"{indent}  - 🗒️ jegyzetek:")
+            lines.append(f"{indent}\t- 🗒️ jegyzetek:")
             lines.extend(_format_markdown_note_lines(record.content, depth + 2))
         if allow_children:
             child_items = sort_items(children_by_parent.get(record.record_id, []))
             if child_items:
-                lines.append(f"{indent}  - 🌿 leágazások")
+                lines.append(f"{indent}\t- 🌿 leágazások")
                 for child in child_items:
                     walk(child, depth + 2, True)
 
