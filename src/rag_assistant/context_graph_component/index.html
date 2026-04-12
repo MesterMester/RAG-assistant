@@ -642,7 +642,7 @@
       }
 
       function fitToContent(payload, viewport, pad) {
-        const layout = computeLayout(payload);
+        const layout = computeLayout(visiblePayload(payload, readCollapsedState()));
         const availableWidth = Math.max(320, viewport.clientWidth - 80);
         const availableHeight = Math.max(240, viewport.clientHeight - 80);
         const nextZoom = Math.max(0.12, Math.min(2.6, Math.min(availableWidth / Math.max(layout.width, 1), availableHeight / Math.max(layout.height, 1))));
@@ -655,7 +655,7 @@
       }
 
       function computeFitState(payload, viewport, pad) {
-        const layout = computeLayout(payload);
+        const layout = computeLayout(visiblePayload(payload, readCollapsedState()));
         const availableWidth = Math.max(320, viewport.clientWidth - 80);
         const availableHeight = Math.max(240, viewport.clientHeight - 80);
         const zoom = Math.max(0.12, Math.min(2.6, Math.min(availableWidth / Math.max(layout.width, 1), availableHeight / Math.max(layout.height, 1))));
@@ -754,6 +754,7 @@
               <div class="note-actions">
                 <button class="mini-btn" data-action="fit">Center / Fit</button>
                 <button class="mini-btn" data-action="focus">Focus</button>
+                <button class="mini-btn" data-action="toggle-detail">Részletek</button>
                 <button class="mini-btn" data-action="reset">Reset</button>
               </div>
             </div>
@@ -794,6 +795,8 @@
                 localStorage.removeItem(storageKey("scroll_top"));
                 localStorage.removeItem(storageKey("auto_fit_done"));
                 render(payload);
+              } else if (action === "toggle-detail") {
+                sendEvent({ action: "toggle_detail_panel" });
               }
             });
           });

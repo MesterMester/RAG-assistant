@@ -230,11 +230,6 @@
         padding: 10px 12px;
         cursor: grab;
       }
-      .task.selected {
-        outline: 2px solid #0f172a;
-        outline-offset: 2px;
-        box-shadow: 0 10px 22px rgba(15, 23, 42, 0.16);
-      }
       .task.dragging {
         opacity: 0.45;
       }
@@ -433,7 +428,6 @@
         if (!selectedRecordId) return;
         const taskEl = app.querySelector(`.task[data-record-id="${CSS.escape(selectedRecordId)}"]`);
         if (!taskEl) return;
-        taskEl.classList.add("selected");
         const boardPane = document.querySelector(".board-pane");
         if (!boardPane) return;
         const taskTop = taskEl.offsetTop;

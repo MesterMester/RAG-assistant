@@ -14,7 +14,6 @@
       .head { font-weight: 700; background: rgba(255,255,255,0.98); z-index: 8; padding: 10px 12px 8px 12px; border-bottom: 1px solid #e2e8f0; flex: 0 0 auto; }
       .col-body { padding: 10px; overflow-y: auto; overflow-x: hidden; min-height: 0; flex: 1 1 auto; }
       .card { background: white; border-left: 4px solid #334155; border-radius: 14px; padding: 10px 12px; box-shadow: 0 4px 14px rgba(15,23,42,0.08); margin-bottom: 8px; cursor: grab; user-select: none; -webkit-user-drag: element; }
-      .card.selected { outline: 2px solid #0f172a; outline-offset: 2px; box-shadow: 0 10px 22px rgba(15,23,42,0.16); }
       .card.dragging { opacity: 0.45; }
       .meta { color: #64748b; font-size: 12px; margin-top: 2px; }
       .empty { color: #94a3b8; font-size: 12px; border: 1px dashed #cbd5e1; border-radius: 12px; padding: 10px; }
@@ -90,7 +89,6 @@
         const payload = message.args.payload || {};
         const statuses = payload.statuses || [];
         const items = payload.items || [];
-        const selectedRecordId = payload.selected_record_id || "";
         const byStatus = new Map();
         items.forEach(item => {
           const key = item.status || "inbox";
@@ -179,10 +177,10 @@
           });
         });
         restoreScroll();
+        const selectedRecordId = payload.selected_record_id || "";
         if (selectedRecordId) {
           const selectedCard = app.querySelector(`.card[data-record-id="${CSS.escape(selectedRecordId)}"]`);
           if (selectedCard) {
-            selectedCard.classList.add("selected");
             const col = selectedCard.closest(".col");
             const body = col ? col.querySelector(".col-body") : null;
             const wrap = document.querySelector(".board-wrap");

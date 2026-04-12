@@ -36,6 +36,7 @@ class AppConfig:
     project_root: Path
     source_dir: Path | None
     thunderbird_import_md: Path | None = None
+    thunderbird_folders_md: Path | None = None
     ollama_embed_model: str = DEFAULT_EMBED_MODEL
     default_chunk_size: int = 800
     default_chunk_overlap: int = 120
@@ -78,10 +79,13 @@ def load_config(project_root: Path | None = None) -> AppConfig:
     source_dir = Path(source_dir_value).expanduser() if source_dir_value else None
     thunderbird_import_md_value = env_values.get("THUNDERBIRD_IMPORT_MD")
     thunderbird_import_md = Path(thunderbird_import_md_value).expanduser() if thunderbird_import_md_value else None
+    thunderbird_folders_md_value = env_values.get("THUNDERBIRD_FOLDERS_MD")
+    thunderbird_folders_md = Path(thunderbird_folders_md_value).expanduser() if thunderbird_folders_md_value else None
     ollama_embed_model = env_values.get("OLLAMA_EMBED_MODEL", DEFAULT_EMBED_MODEL)
     return AppConfig(
         project_root=root,
         source_dir=source_dir,
         thunderbird_import_md=thunderbird_import_md,
+        thunderbird_folders_md=thunderbird_folders_md,
         ollama_embed_model=ollama_embed_model,
     )

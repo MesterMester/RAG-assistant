@@ -40,6 +40,13 @@ class ThunderbirdImportConfig:
 
 
 @dataclass(slots=True)
+class ThunderbirdFolderRules:
+    md_path: Path
+    included_paths: list[str]
+    excluded_paths: list[str]
+
+
+@dataclass(slots=True)
 class ThunderbirdMailboxInventory:
     path: str
     size_bytes: int
@@ -81,6 +88,10 @@ def _parse_int(value: str, default: int) -> int:
         return int(value.strip())
     except (TypeError, ValueError):
         return default
+
+
+def _normalize_relative_mail_path(value: str) -> str:
+    return value.strip().strip("`").strip().replace("\\", "/").strip("/")
 
 
 def load_thunderbird_import_config(md_path: Path) -> tuple[ThunderbirdImportConfig | None, list[str]]:
@@ -154,6 +165,40 @@ def load_thunderbird_import_config(md_path: Path) -> tuple[ThunderbirdImportConf
     )
 
 
+def load_thunderbird_folder_rules(md_path: Path | None) -> tuple[ThunderbirdFolderRules | None, list[str]]:
+    if md_path is None:
+        return ThunderbirdFolderRules(md_path=Path(""), included_paths=[], excluded_paths=[]), []
+    errors: list[str] = []
+    if not md_path.exists():
+        return None, [f"A Thunderbird folders MD fájl nem található: {md_path}"]
+
+    section = ""
+    included: list[str] = []
+    excluded: list[str] = []
+    for raw_line in md_path.read_text(encoding="utf-8").splitlines():
+        line = raw_line.strip()
+        if not line:
+            continue
+        heading = line.lower().strip("# ").strip()
+        if heading == "included paths":
+            section = "included"
+            continue
+        if heading == "excluded paths":
+            section = "excluded"
+            continue
+        if not line.startswith(("-", "*")):
+            continue
+        value = _normalize_relative_mail_path(_clean_md_value(line[1:].strip()))
+        if not value:
+            continue
+        if section == "included":
+            included.append(value)
+        elif section == "excluded":
+            excluded.append(value)
+
+    return ThunderbirdFolderRules(md_path=md_path, included_paths=included, excluded_paths=excluded), errors
+
+
 def _is_mailbox_candidate(path: Path, exclude_folders: list[str]) -> bool:
     if not path.is_file():
         return False
@@ -171,7 +216,32 @@ def _is_mailbox_candidate(path: Path, exclude_folders: list[str]) -> bool:
     return path.stat().st_size > 0
 
 
-def discover_mailboxes(config: ThunderbirdImportConfig) -> tuple[list[ThunderbirdMailboxInventory], list[str]]:
+def _relative_mailbox_path(path: Path, config: ThunderbirdImportConfig, root: Path) -> str:
+    try:
+        if config.profile_root and path.is_relative_to(config.profile_root):
+            return path.relative_to(config.profile_root).as_posix()
+    except Exception:
+        pass
+    try:
+        return f"{root.name}/{path.relative_to(root).as_posix()}".strip("/")
+    except Exception:
+        return path.name
+
+
+def _matches_folder_rules(relative_path: str, rules: ThunderbirdFolderRules | None) -> bool:
+    if not rules:
+        return True
+    normalized = _normalize_relative_mail_path(relative_path)
+    if rules.included_paths:
+        if not any(normalized == item or normalized.endswith(f"/{item}") for item in rules.included_paths):
+            return False
+    if rules.excluded_paths:
+        if any(normalized == item or normalized.endswith(f"/{item}") for item in rules.excluded_paths):
+            return False
+    return True
+
+
+def discover_mailboxes(config: ThunderbirdImportConfig, rules: ThunderbirdFolderRules | None = None) -> tuple[list[ThunderbirdMailboxInventory], list[str]]:
     inventory: list[ThunderbirdMailboxInventory] = []
     errors: list[str] = []
     for root in config.mail_roots:
@@ -181,6 +251,9 @@ def discover_mailboxes(config: ThunderbirdImportConfig) -> tuple[list[Thunderbir
         for path in root.rglob("*"):
             try:
                 if not _is_mailbox_candidate(path, config.exclude_folders):
+                    continue
+                relative_path = _relative_mailbox_path(path, config, root)
+                if not _matches_folder_rules(relative_path, rules):
                     continue
                 account_hint = path.relative_to(root).parts[0] if path != root and path.relative_to(root).parts else root.name
                 inventory.append(

@@ -46,6 +46,7 @@ from rag_assistant.thunderbird_importer import (
     ThunderbirdMailboxInventory,
     ThunderbirdMessagePreview,
     discover_mailboxes,
+    load_thunderbird_folder_rules,
     load_thunderbird_import_config,
     preview_messages,
     thunderbird_preview_rows,
@@ -1303,6 +1304,24 @@ def format_estimate_minutes_label(value: str) -> str:
     return f"{minutes} perc"
 
 
+def split_estimate_parts(value: str) -> tuple[int, int]:
+    minutes = estimate_to_minutes(value)
+    if minutes is None:
+        return 0, 0
+    return minutes // 60, minutes % 60
+
+
+def combine_estimate_parts(hours: int, minutes: int) -> str:
+    safe_hours = max(0, int(hours or 0))
+    safe_minutes = max(0, min(59, int(minutes or 0)))
+    total = safe_hours * 60 + safe_minutes
+    if total <= 0:
+        return ""
+    if safe_hours == 0:
+        return str(safe_minutes)
+    return f"{safe_hours}:{safe_minutes:02d}"
+
+
 def minutes_to_keycap(value: int | None) -> str:
     if value is None:
         return "🤖"
@@ -1488,7 +1507,7 @@ def _format_markdown_note_lines(content: str, depth: int) -> list[str]:
     return lines
 
 
-def render_markdown_obsidian(records: list[KnowledgeRecord], all_records: list[KnowledgeRecord], include_notes_by_id: dict[str, bool], include_children_by_id: dict[str, bool], include_parents_by_id: dict[str, bool]) -> str:
+def render_markdown_obsidian(records: list[KnowledgeRecord], all_records: list[KnowledgeRecord], include_notes_by_id: dict[str, bool], include_children_by_id: dict[str, bool], include_parents_by_id: dict[str, bool], include_detail_lines: bool = True) -> str:
     lookup = {record.record_id: record for record in records}
     all_lookup = {record.record_id: record for record in all_records}
     children_by_parent: dict[str, list[KnowledgeRecord]] = {}
@@ -1551,6 +1570,12 @@ def render_markdown_obsidian(records: list[KnowledgeRecord], all_records: list[K
     def walk(record: KnowledgeRecord, depth: int, allow_children: bool) -> None:
         indent = "\t" * depth
         lines.append(f"{indent}{node_prefix(record)}")
+        if not include_detail_lines:
+            if allow_children:
+                child_items = sort_items(children_by_parent.get(record.record_id, []))
+                for child in child_items:
+                    walk(child, depth + 1, True)
+            return
         info_bits = [f"type: {record.entity_type}", f"status: {record.status}"]
         if record.start_at:
             info_bits.append(f"start: {record.start_at}")
@@ -2062,17 +2087,24 @@ def render_record_editor(
     if show_next_steps:
         step_col1, step_col2 = st.columns([2, 1])
         next_step = step_col1.text_input("Next step", value=record.next_step, key=f"{key_prefix}_next_step")
-        estimate_options = estimate_minutes_options()
-        current_estimate = normalize_estimate_hhmm(record.next_step_estimate)
-        if current_estimate and current_estimate not in estimate_options:
-            estimate_options.append(current_estimate)
-        next_step_estimate = step_col2.selectbox(
-            "Becsult ido (perc)",
-            options=estimate_options,
-            index=estimate_options.index(current_estimate) if current_estimate in estimate_options else 0,
-            format_func=format_estimate_minutes_label,
-            key=f"{key_prefix}_next_step_estimate",
+        estimate_hours_default, estimate_minutes_default = split_estimate_parts(record.next_step_estimate)
+        hour_col, minute_col = step_col2.columns(2)
+        estimate_hours = hour_col.number_input(
+            "Óra",
+            min_value=0,
+            step=1,
+            value=estimate_hours_default,
+            key=f"{key_prefix}_next_step_estimate_hours",
         )
+        estimate_minutes = minute_col.number_input(
+            "Perc",
+            min_value=0,
+            max_value=59,
+            step=1,
+            value=estimate_minutes_default,
+            key=f"{key_prefix}_next_step_estimate_minutes",
+        )
+        next_step_estimate = combine_estimate_parts(int(estimate_hours), int(estimate_minutes))
     else:
         next_step = ""
         next_step_estimate = ""
@@ -2908,6 +2940,10 @@ def render_execution_graph(records: list[KnowledgeRecord], layout: dict, layout_
     st.divider()
     st.markdown("**Task history**")
     selected_execution_id = st.session_state.get("execution_selected_record_id")
+    global_selected_id = st.session_state.get("selected_record_id")
+    if global_selected_id in valid_task_ids and selected_execution_id != global_selected_id:
+        selected_execution_id = global_selected_id
+        st.session_state["execution_selected_record_id"] = selected_execution_id
     if selected_execution_id not in valid_task_ids and valid_task_ids:
         selected_execution_id = valid_task_ids[0]
         st.session_state["execution_selected_record_id"] = selected_execution_id
@@ -3123,6 +3159,7 @@ def app() -> None:
     st.sidebar.write(f"Planning layout: `{planning_layout_path}`")
     st.sidebar.write(f"History log: `{history_events_path}`")
     st.sidebar.write(f"Thunderbird import MD: `{config.thunderbird_import_md or '-'}`")
+    st.sidebar.write(f"Thunderbird folders MD: `{config.thunderbird_folders_md or '-'}`")
     if selected_record:
         st.sidebar.subheader("Kivalasztott rekord")
         st.sidebar.write(record_label(selected_record))
@@ -3506,7 +3543,7 @@ def app() -> None:
     with tab_kanban:
         st.subheader("Kanban nezet")
         st.caption("Drag-and-drop statuszvaltas task, case es project rekordokra. Az `inbox` itt `Backlog` neven jelenik meg.")
-        show_kanban_detail = st.toggle("Részletek panel", value=st.session_state.get("show_kanban_detail", True), key="show_kanban_detail")
+        show_kanban_detail = st.toggle("Részletek panel", value=st.session_state.get("show_kanban_detail", False), key="show_kanban_detail")
         with st.expander("Szűrés", expanded=False):
             filter_col1, filter_col2, filter_col3, filter_col4 = st.columns(4)
             kanban_project = filter_col1.text_input("Projekt", key="kanban_filter_project")
@@ -3744,6 +3781,7 @@ def app() -> None:
                 format_func=lambda value: {"obsidian": "Teljes, struktúrált Obsidian MD", "blocks": "Csak blokkok, hierarchikusan"}.get(value, value),
                 key="md_export_format",
             )
+            include_detail_lines = st.checkbox("Részletes al-sorok", value=True, key="md_export_detail_lines")
 
             include_children_by_id: dict[str, bool] = {}
             include_parents_by_id: dict[str, bool] = {}
@@ -3766,7 +3804,7 @@ def app() -> None:
             default_filename = export_filename_suggestion(selected_records)
             file_name = st.text_input("Fájlnév", value=st.session_state.get("md_export_filename", default_filename) or default_filename, key="md_export_filename")
 
-            rendered_markdown = render_markdown_obsidian(scope_records, records, include_notes_by_id, include_children_by_id, include_parents_by_id) if export_format == "obsidian" else render_markdown_blocks(scope_records)
+            rendered_markdown = render_markdown_obsidian(scope_records, records, include_notes_by_id, include_children_by_id, include_parents_by_id, include_detail_lines=include_detail_lines) if export_format == "obsidian" else render_markdown_blocks(scope_records)
             st.markdown("**Előnézet**")
             st.code(rendered_markdown, language="markdown")
 
@@ -3794,6 +3832,7 @@ def app() -> None:
                             "include_parents": include_parents_by_id,
                             "include_relations": include_relations,
                             "include_notes": include_notes_by_id,
+                            "include_detail_lines": include_detail_lines,
                         },
                     },
                 )
@@ -3807,18 +3846,27 @@ def app() -> None:
         else:
             st.write(f"Config MD: `{config.thunderbird_import_md}`")
             tb_config, tb_config_errors = load_thunderbird_import_config(config.thunderbird_import_md)
+            folder_rules, folder_rule_errors = load_thunderbird_folder_rules(config.thunderbird_folders_md)
             if tb_config_errors:
                 for error in tb_config_errors:
                     st.error(error)
+            for error in folder_rule_errors:
+                st.warning(error)
             if tb_config:
                 roots_text = "\n".join(f"- `{root}`" for root in tb_config.mail_roots) or "-"
                 st.markdown(f"**Mail gyökerek**\n{roots_text}")
+                st.write(f"Folders MD: `{config.thunderbird_folders_md or '-'}`")
+                if folder_rules:
+                    included_text = "\n".join(f"- `{path}`" for path in folder_rules.included_paths) or "- *(minden megengedett)*"
+                    excluded_text = "\n".join(f"- `{path}`" for path in folder_rules.excluded_paths) or "- *(nincs külön tiltás)*"
+                    st.markdown(f"**Included paths**\n{included_text}")
+                    st.markdown(f"**Excluded paths**\n{excluded_text}")
                 st.caption(
                     "A `profile_root` lehet maga a Thunderbird profilkönyvtár is, amelyben a `global-messages-db.sqlite`, `ImapMail` vagy `Mail` mappák vannak. Megadhatsz közvetlen `ImapMail` vagy `Mail` útvonalat is."
                 )
                 action_col1, action_col2 = st.columns(2)
                 if action_col1.button("Mailboxok felderítése", key="tb_discover_mailboxes"):
-                    inventory, inventory_errors = discover_mailboxes(tb_config)
+                    inventory, inventory_errors = discover_mailboxes(tb_config, folder_rules)
                     st.session_state["tb_inventory_rows"] = [item.to_dict() for item in inventory]
                     st.session_state["tb_inventory_errors"] = inventory_errors
                     st.session_state["tb_preview_rows"] = []
@@ -3827,7 +3875,7 @@ def app() -> None:
                 if action_col2.button("Preview frissítése", key="tb_preview_mailboxes"):
                     inventory_rows = st.session_state.get("tb_inventory_rows", [])
                     if not inventory_rows:
-                        inventory, inventory_errors = discover_mailboxes(tb_config)
+                        inventory, inventory_errors = discover_mailboxes(tb_config, folder_rules)
                         inventory_rows = [item.to_dict() for item in inventory]
                         st.session_state["tb_inventory_rows"] = inventory_rows
                         st.session_state["tb_inventory_errors"] = inventory_errors
@@ -3899,7 +3947,7 @@ def app() -> None:
                     st.warning(error)
 
     with tab_execution:
-        show_execution_detail = st.toggle("Részletek panel", value=st.session_state.get("show_execution_detail", True), key="show_execution_detail")
+        show_execution_detail = st.toggle("Részletek panel", value=st.session_state.get("show_execution_detail", False), key="show_execution_detail")
         if show_execution_detail:
             exec_col, exec_detail_col = st.columns([2.2, 1.1])
             with exec_col:
@@ -3995,16 +4043,22 @@ def app() -> None:
             if not filtered_graph_records:
                 st.info("A szurok mellett nincs megjelenitheto rekord.")
             else:
-                selected_record_id = st.session_state.get("context_graph_selected_record_id")
+                st.session_state.pop("context_graph_requested_record_id", None)
+                st.session_state.pop("context_graph_pending_record_id", None)
                 visible_ids = {record.record_id for record in visible_graph_records}
+                selected_record_id = st.session_state.get("context_graph_selected_record_id")
                 if selected_record_id not in visible_ids:
                     selected_record_id = filtered_graph_records[0].record_id
                     st.session_state["context_graph_selected_record_id"] = selected_record_id
                     st.session_state["selected_record_id"] = selected_record_id
 
                 panel_height = 700
-                graph_col, editor_col = st.columns([2.2, 1.1])
-                with graph_col:
+                show_context_detail = st.session_state.get("show_context_detail", True)
+                graph_host = st.container()
+                editor_host = None
+                if show_context_detail:
+                    graph_host, editor_host = st.columns([2.2, 1.1])
+                with graph_host:
                     graph_box = st.container(height=panel_height, border=True)
                     with graph_box:
                         graph_payload = build_context_graph_payload(
@@ -4017,16 +4071,24 @@ def app() -> None:
                             export_selected_ids,
                         )
                         graph_result = context_graph(graph_payload, key="context_graph_surface")
-                        if isinstance(graph_result, dict) and graph_result.get("action") in {"select_node", "reparent_node", "toggle_export"}:
+                        if isinstance(graph_result, dict) and graph_result.get("action") in {"select_node", "reparent_node", "toggle_export", "toggle_detail_panel"}:
                             event_id = str(graph_result.get("event_id", "")).strip()
                             if not event_id or st.session_state.get("last_context_graph_event") != event_id:
                                 if event_id:
                                     st.session_state["last_context_graph_event"] = event_id
+                                if graph_result.get("action") == "toggle_detail_panel":
+                                    st.session_state["show_context_detail"] = not st.session_state.get("show_context_detail", True)
+                                    st.rerun()
                                 if graph_result.get("action") == "select_node":
                                     record_id = str(graph_result.get("record_id", "")).strip()
-                                    if record_id and record_id in {record.record_id for record in records}:
-                                        st.session_state["context_graph_requested_record_id"] = record_id
+                                    selected_context_record = next((record for record in records if record.record_id == record_id), None)
+                                    if selected_context_record:
+                                        st.session_state["context_graph_selected_record_id"] = record_id
                                         st.session_state["selected_record_id"] = record_id
+                                        if selected_context_record.entity_type == "task":
+                                            st.session_state["execution_selected_record_id"] = record_id
+                                            if selected_context_record.planning_bucket:
+                                                st.session_state["pending_execution_filter_bucket"] = selected_context_record.planning_bucket
                                         st.rerun()
                                 if graph_result.get("action") == "toggle_export":
                                     record_id = str(graph_result.get("record_id", "")).strip()
@@ -4057,123 +4119,97 @@ def app() -> None:
                                             history_events_path,
                                             "Context Graph hierarchia frissitve.",
                                         )
-
-                with editor_col:
-                    selected_record = next((record for record in records if record.record_id == st.session_state.get("context_graph_selected_record_id")), None)
-                    editor_box = st.container(height=panel_height, border=True)
-                    with editor_box:
-                        if selected_record is None:
-                            st.info("Valassz ki egy rekordot a grafon.")
-                        else:
-                            st.caption(f"Kijelolt rekord: {record_label(selected_record)}")
-                            if selected_record.entity_type == "task" and (selected_record.next_step or selected_record.next_step_estimate):
-                                meta_bits = []
-                                if selected_record.next_step:
-                                    meta_bits.append(f"🥾 {selected_record.next_step}")
-                                if selected_record.next_step_estimate:
-                                    meta_bits.append(f"⏱️ {selected_record.next_step_estimate}")
-                                st.caption(" | ".join(meta_bits))
-                            action_placeholder = st.empty()
-                            edit_values = render_record_editor(
-                                f"context_graph_edit_{selected_record.record_id}",
-                                records,
-                                existing_values,
-                                planning_options,
-                                planning_titles,
-                                base_record=selected_record,
-                                allow_parent_edit=False,
-                            )
-                            staged_record = record_from_editor_values(selected_record, edit_values)
-                            context_dirty = editor_values_dirty(selected_record, edit_values)
-                            requested_record_id = st.session_state.pop("context_graph_requested_record_id", "")
-                            if requested_record_id and requested_record_id != selected_record.record_id:
-                                if context_dirty:
-                                    st.session_state["context_graph_pending_record_id"] = requested_record_id
-                                else:
-                                    st.session_state["context_graph_selected_record_id"] = requested_record_id
-                                    st.session_state["selected_record_id"] = requested_record_id
-                                    st.rerun()
-                            pending_record_id = st.session_state.get("context_graph_pending_record_id", "")
-                            if pending_record_id and pending_record_id != selected_record.record_id:
-                                st.warning("Van nem mentett változás. Ha most váltasz, ezek elveszhetnek.")
-                                pending_col1, pending_col2, pending_col3 = st.columns(3)
-                                if pending_col1.button("Igen, mentés", key=f"context_pending_save_{selected_record.record_id}"):
-                                    st.session_state["context_graph_selected_record_id"] = pending_record_id
-                                    st.session_state["selected_record_id"] = pending_record_id
-                                    st.session_state.pop("context_graph_pending_record_id", None)
-                                    persist_record(staged_record, source_dir, config, records_path, index_path, chroma_dir, history_events_path)
-                                if pending_col2.button("Vissza", key=f"context_pending_back_{selected_record.record_id}"):
-                                    st.session_state.pop("context_graph_pending_record_id", None)
-                                    st.rerun()
-                                if pending_col3.button("Nem, eldobás", key=f"context_pending_discard_{selected_record.record_id}"):
-                                    st.session_state["context_graph_selected_record_id"] = pending_record_id
-                                    st.session_state["selected_record_id"] = pending_record_id
-                                    st.session_state.pop("context_graph_pending_record_id", None)
-                                    st.rerun()
-                            with action_placeholder.container():
-                                action_col1, action_col2, action_col3, action_col4, action_col5, action_col6 = st.columns(6)
-                                if action_col1.button("Mentés", key="save_context_graph_record"):
-                                    persist_record(staged_record, source_dir, config, records_path, index_path, chroma_dir, history_events_path)
-                                if action_col2.button("Add child", key="add_child_context_graph"):
-                                    child_record = KnowledgeRecord(
-                                        record_id=build_record_id("Uj child"),
-                                        title="Uj child",
-                                        summary="",
-                                        content="",
-                                        source_type="manual",
-                                        entity_type="note",
-                                        status="inbox",
-                                        organization=selected_record.organization,
-                                        team=selected_record.team,
-                                        project=selected_record.project,
-                                        case_name=selected_record.case_name,
-                                        parent_id=selected_record.record_id,
-                                    )
-                                    st.session_state["context_graph_selected_record_id"] = child_record.record_id
-                                    st.session_state["selected_record_id"] = child_record.record_id
-                                    persist_record(child_record, source_dir, config, records_path, index_path, chroma_dir, history_events_path)
-                                if action_col3.button("Add sibling", key="add_sibling_context_graph"):
-                                    sibling_record = KnowledgeRecord(
-                                        record_id=build_record_id("Uj sibling"),
-                                        title="Uj sibling",
-                                        summary="",
-                                        content="",
-                                        source_type="manual",
-                                        entity_type="note",
-                                        status="inbox",
-                                        organization=selected_record.organization,
-                                        team=selected_record.team,
-                                        project=selected_record.project,
-                                        case_name=selected_record.case_name,
-                                        parent_id=selected_record.parent_id,
-                                    )
-                                    st.session_state["context_graph_selected_record_id"] = sibling_record.record_id
-                                    st.session_state["selected_record_id"] = sibling_record.record_id
-                                    persist_record(sibling_record, source_dir, config, records_path, index_path, chroma_dir, history_events_path)
-                                if action_col4.button("Részlet", key="open_from_context_graph"):
-                                    st.session_state["selected_record_id"] = selected_record.record_id
-                                    st.rerun()
-                                if action_col5.button("History", key="open_history_context_graph"):
-                                    st.session_state[f"context_history_{selected_record.record_id}"] = not st.session_state.get(f"context_history_{selected_record.record_id}", False)
-                                if action_col6.button("Törlés", key="delete_context_graph_record"):
-                                    updated_records = remove_record_and_reparent_children(records, selected_record.record_id)
-                                    if updated_records == records:
-                                        st.warning("A rekord nem található vagy nem törölhető.")
-                                    else:
-                                        remaining = [record for record in updated_records if record.record_id != selected_record.record_id]
-                                        if remaining:
-                                            st.session_state["context_graph_selected_record_id"] = remaining[0].record_id
-                                            st.session_state["selected_record_id"] = remaining[0].record_id
-                                        persist_records_bulk(
-                                            updated_records,
-                                            source_dir,
-                                            config,
-                                            records_path,
-                                            index_path,
-                                            chroma_dir,
-                                            history_events_path,
-                                            "Context Graph rekord törölve.",
+                if editor_host is not None:
+                    with editor_host:
+                        selected_record = next((record for record in records if record.record_id == st.session_state.get("context_graph_selected_record_id")), None)
+                        editor_box = st.container(height=panel_height, border=True)
+                        with editor_box:
+                            if selected_record is None:
+                                st.info("Valassz ki egy rekordot a grafon.")
+                            else:
+                                st.caption(f"Kijelolt rekord: {record_label(selected_record)}")
+                                if selected_record.entity_type == "task" and (selected_record.next_step or selected_record.next_step_estimate):
+                                    meta_bits = []
+                                    if selected_record.next_step:
+                                        meta_bits.append(f"🥾 {selected_record.next_step}")
+                                    if selected_record.next_step_estimate:
+                                        meta_bits.append(f"⏱️ {selected_record.next_step_estimate}")
+                                    st.caption(" | ".join(meta_bits))
+                                action_placeholder = st.empty()
+                                edit_values = render_record_editor(
+                                    f"context_graph_edit_{selected_record.record_id}",
+                                    records,
+                                    existing_values,
+                                    planning_options,
+                                    planning_titles,
+                                    base_record=selected_record,
+                                    allow_parent_edit=False,
+                                )
+                                staged_record = record_from_editor_values(selected_record, edit_values)
+                                with action_placeholder.container():
+                                    action_col1, action_col2, action_col3, action_col4, action_col5, action_col6 = st.columns(6)
+                                    if action_col1.button("Mentés", key="save_context_graph_record"):
+                                        persist_record(staged_record, source_dir, config, records_path, index_path, chroma_dir, history_events_path)
+                                    if action_col2.button("Add child", key="add_child_context_graph"):
+                                        child_record = KnowledgeRecord(
+                                            record_id=build_record_id("Uj child"),
+                                            title="Uj child",
+                                            summary="",
+                                            content="",
+                                            source_type="manual",
+                                            entity_type="note",
+                                            status="inbox",
+                                            organization=selected_record.organization,
+                                            team=selected_record.team,
+                                            project=selected_record.project,
+                                            case_name=selected_record.case_name,
+                                            parent_id=selected_record.record_id,
                                         )
+                                        st.session_state["context_graph_selected_record_id"] = child_record.record_id
+                                        st.session_state["selected_record_id"] = child_record.record_id
+                                        persist_record(child_record, source_dir, config, records_path, index_path, chroma_dir, history_events_path)
+                                    if action_col3.button("Add sibling", key="add_sibling_context_graph"):
+                                        sibling_record = KnowledgeRecord(
+                                            record_id=build_record_id("Uj sibling"),
+                                            title="Uj sibling",
+                                            summary="",
+                                            content="",
+                                            source_type="manual",
+                                            entity_type="note",
+                                            status="inbox",
+                                            organization=selected_record.organization,
+                                            team=selected_record.team,
+                                            project=selected_record.project,
+                                            case_name=selected_record.case_name,
+                                            parent_id=selected_record.parent_id,
+                                        )
+                                        st.session_state["context_graph_selected_record_id"] = sibling_record.record_id
+                                        st.session_state["selected_record_id"] = sibling_record.record_id
+                                        persist_record(sibling_record, source_dir, config, records_path, index_path, chroma_dir, history_events_path)
+                                    if action_col4.button("Részlet", key="open_from_context_graph"):
+                                        st.session_state["selected_record_id"] = selected_record.record_id
+                                        st.rerun()
+                                    if action_col5.button("History", key="open_history_context_graph"):
+                                        st.session_state[f"context_history_{selected_record.record_id}"] = not st.session_state.get(f"context_history_{selected_record.record_id}", False)
+                                    if action_col6.button("Törlés", key="delete_context_graph_record"):
+                                        updated_records = remove_record_and_reparent_children(records, selected_record.record_id)
+                                        if updated_records == records:
+                                            st.warning("A rekord nem található vagy nem törölhető.")
+                                        else:
+                                            remaining = [record for record in updated_records if record.record_id != selected_record.record_id]
+                                            if remaining:
+                                                st.session_state["context_graph_selected_record_id"] = remaining[0].record_id
+                                                st.session_state["selected_record_id"] = remaining[0].record_id
+                                            persist_records_bulk(
+                                                updated_records,
+                                                source_dir,
+                                                config,
+                                                records_path,
+                                                index_path,
+                                                chroma_dir,
+                                                history_events_path,
+                                                "Context Graph rekord törölve.",
+                                            )
                             with st.expander("Markdown hierarchy import", expanded=False):
                                 markdown_import_raw = st.text_area(
                                     "Markdown fa beillesztése a kijelölt node alá",
