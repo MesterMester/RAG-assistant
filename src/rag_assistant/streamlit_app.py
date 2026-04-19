@@ -1289,6 +1289,14 @@ def estimate_minutes_options() -> list[str]:
     return [""] + [str(value) for value in options]
 
 
+def estimate_hour_options() -> list[int]:
+    return list(range(0, 13))
+
+
+def estimate_minute_options() -> list[int]:
+    return list(range(0, 60))
+
+
 def format_estimate_minutes_label(value: str) -> str:
     if not value:
         return "nincs"
@@ -2089,19 +2097,16 @@ def render_record_editor(
         next_step = step_col1.text_input("Next step", value=record.next_step, key=f"{key_prefix}_next_step")
         estimate_hours_default, estimate_minutes_default = split_estimate_parts(record.next_step_estimate)
         hour_col, minute_col = step_col2.columns(2)
-        estimate_hours = hour_col.number_input(
+        estimate_hours = hour_col.selectbox(
             "Óra",
-            min_value=0,
-            step=1,
-            value=estimate_hours_default,
+            options=estimate_hour_options(),
+            index=estimate_hour_options().index(estimate_hours_default) if estimate_hours_default in estimate_hour_options() else 0,
             key=f"{key_prefix}_next_step_estimate_hours",
         )
-        estimate_minutes = minute_col.number_input(
+        estimate_minutes = minute_col.selectbox(
             "Perc",
-            min_value=0,
-            max_value=59,
-            step=1,
-            value=estimate_minutes_default,
+            options=estimate_minute_options(),
+            index=estimate_minute_options().index(estimate_minutes_default) if estimate_minutes_default in estimate_minute_options() else 0,
             key=f"{key_prefix}_next_step_estimate_minutes",
         )
         next_step_estimate = combine_estimate_parts(int(estimate_hours), int(estimate_minutes))
@@ -4052,7 +4057,13 @@ def app() -> None:
                     st.session_state["context_graph_selected_record_id"] = selected_record_id
                     st.session_state["selected_record_id"] = selected_record_id
 
-                panel_height = 700
+                panel_height = st.select_slider(
+                    "Vászon magasság",
+                    options=[700, 780, 860, 940, 1020],
+                    value=st.session_state.get("context_graph_panel_height", 780),
+                    key="context_graph_panel_height",
+                    format_func=lambda value: f"{value}px",
+                )
                 show_context_detail = st.session_state.get("show_context_detail", True)
                 graph_host = st.container()
                 editor_host = None
