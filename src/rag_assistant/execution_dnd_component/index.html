@@ -195,6 +195,14 @@
         background: var(--bucket-bg, #fff);
         transition: transform 120ms ease, box-shadow 120ms ease, border-color 120ms ease;
       }
+      .bucket.movable {
+      }
+      .bucket.movable.dragging {
+        opacity: 0.5;
+      }
+      .block-handle {
+        cursor: grab;
+      }
       .bucket.drag-over {
         transform: translateY(-2px);
         box-shadow: 0 14px 26px rgba(15, 23, 42, 0.12);
@@ -228,10 +236,13 @@
         background: rgba(255,255,255,0.92);
         box-shadow: 0 5px 14px rgba(15, 23, 42, 0.08);
         padding: 10px 12px;
-        cursor: grab;
+        cursor: pointer;
       }
       .task.dragging {
         opacity: 0.45;
+      }
+      .task-handle {
+        cursor: grab;
       }
       .task-title {
         font-weight: 700;
@@ -465,12 +476,14 @@
       function attachDropTargets(app) {
         app.querySelectorAll("[data-bucket-key]").forEach(targetEl => {
           targetEl.addEventListener("dragover", event => {
+            if (dragBlockId) return;
             event.preventDefault();
             targetEl.classList.add("drag-over");
             event.dataTransfer.dropEffect = "move";
           });
           targetEl.addEventListener("dragleave", () => targetEl.classList.remove("drag-over"));
           targetEl.addEventListener("drop", event => {
+            if (dragBlockId) return;
             event.preventDefault();
             targetEl.classList.remove("drag-over");
             const recordId = dragRecordId || event.dataTransfer.getData("text/plain");
@@ -656,7 +669,7 @@
           const computedDayTotal = (day.blocks || []).reduce((sum, bucket) => sum + bucketEstimateMinutes(bucket), 0) + (includeFocus ? (taskByBucket.get("main_focus") || []).reduce((sum, task) => sum + (Number(task.estimate_minutes) || 0), 0) : 0);
           if (compact) {
             return `
-              <div class="tree-day">
+              <div class="tree-day" data-drop-day-key="${escapeHtml(day.source_day_key || day.key || "")}">
                 ${hideTitle ? `` : `<div style="display:flex;align-items:center;gap:8px;margin-bottom:6px;"><span class="tree-link" data-anchor-target="anchor-${escapeHtml(day.key || day.title)}" style="font-weight:700;">${escapeHtml(day.title)}</span>${computedDayTotal ? `<span style="font-size:11px;color:#475569;">${escapeHtml(estimateLabel(computedDayTotal))}</span>` : ``}${(day.source_day_key || day.key) !== "__unscheduled__" ? `<button class="mini-btn" data-add-block-day="${escapeHtml(day.source_day_key || day.key || "")}" draggable="false">+</button><button class="mini-btn" data-rename-day="${escapeHtml(day.source_day_key || day.key || "")}" data-current-title="${escapeHtml(day.title || "")}" draggable="false">✎</button>` : ``}</div>`}
                 <div class="tree-section">${renderTreeBlocks(day)}</div>
               </div>
@@ -697,8 +710,14 @@
             });
             const taskMarkup = entries.length
               ? entries.map(task => `
-                <div class="task" draggable="true" data-record-id="${escapeHtml(task.record_id)}" style="--bucket-accent:${style.accent};">
-                  <div class="task-title" style="display:flex;align-items:center;justify-content:space-between;gap:8px;"><span>${escapeHtml(task.title)}</span><button class="mini-btn ${task.export_selected ? `export-on` : ``}" data-toggle-export="${escapeHtml(task.record_id)}" draggable="false">${task.export_selected ? `◉` : `◎`}</button></div>
+                <div class="task" data-record-id="${escapeHtml(task.record_id)}" style="--bucket-accent:${style.accent};">
+                  <div class="task-title" style="display:flex;align-items:center;justify-content:space-between;gap:8px;">
+                    <span style="display:flex;align-items:center;gap:6px;">
+                      <span class="mini-btn task-handle" data-task-drag="${escapeHtml(task.record_id)}" draggable="true" title="Task áthúzása">⇅</span>
+                      <span>${escapeHtml(task.title)}</span>
+                    </span>
+                    <button class="mini-btn ${task.export_selected ? `export-on` : ``}" data-toggle-export="${escapeHtml(task.record_id)}" draggable="false">${task.export_selected ? `◉` : `◎`}</button>
+                  </div>
                   <div class="task-meta">${escapeHtml(task.project || "-")} / ${escapeHtml(task.case_name || "-")}</div>
                   ${task.next_step ? `<div class="task-step">🥾 ${escapeHtml(task.next_step)}</div>` : ``}
                   ${task.next_step_estimate ? `<div class="task-estimate">⏱️ ${escapeHtml(task.next_step_estimate)}</div>` : ``}
@@ -710,10 +729,13 @@
             const bucketExport = exportIcon(bucketIds);
             const totalEstimate = entries.reduce((sum, task) => sum + (Number(task.estimate_minutes) || 0), 0);
             return `
-              <div class="bucket ${bucket.droppable === false ? `non-droppable` : ``}" ${bucket.droppable === false ? `` : `data-bucket-key="${escapeHtml(bucket.drop_target_key || bucket.key)}"`} style="--bucket-bg:${style.bg};--bucket-accent:${style.accent};">
+              <div class="bucket ${bucket.droppable === false ? `non-droppable` : ``} ${bucket.lane === "session" ? `movable` : ``}" ${bucket.droppable === false ? `` : `data-bucket-key="${escapeHtml(bucket.drop_target_key || bucket.key)}"`} style="--bucket-bg:${style.bg};--bucket-accent:${style.accent};">
                 <div class="bucket-header">
                   <div style="display:flex;align-items:center;justify-content:space-between;gap:8px;">
-                    <div class="bucket-title">${escapeHtml(bucket.title)}</div>
+                    <div style="display:flex;align-items:center;gap:6px;">
+                      ${bucket.lane === "session" ? `<span class="mini-btn block-handle" draggable="true" data-block-id="${escapeHtml(bucket.key)}" title="Blokk áthúzása">⇅</span>` : ``}
+                      <div class="bucket-title">${escapeHtml(bucket.title)}</div>
+                    </div>
                     <div style="display:flex;align-items:center;gap:6px;">
                       <button class="mini-btn ${bucketExport.className}" data-toggle-export-many="${escapeHtml(bucketIds.join(','))}" draggable="false">${bucketExport.label}</button>
                       ${bucket.lane === "session" ? `<button class="mini-btn" data-move-block="${escapeHtml(bucket.key)}" data-source-day-key="${escapeHtml(bucket.source_day_key || day.source_day_key || day.key || "")}" draggable="false">⇄</button><button class="mini-btn danger" data-remove-block="${escapeHtml(bucket.key)}" draggable="false">×</button>` : ``}
@@ -727,14 +749,14 @@
           }).join("");
           if (compact) {
             return `
-              <div class="day" id="anchor-${escapeHtml(day.key || day.title)}">
+              <div class="day" id="anchor-${escapeHtml(day.key || day.title)}" data-drop-day-key="${escapeHtml(day.source_day_key || day.key || "")}">
                 ${hideTitle ? `` : `<div style="display:flex;align-items:center;gap:8px;margin-bottom:10px;"><div class="day-title">${escapeHtml(day.title)}</div>${dayTotal ? `<span style="font-size:12px;color:#475569;">${escapeHtml(estimateLabel(dayTotal))}</span>` : ``}<button class="mini-btn ${dayExport.className}" data-toggle-export-many="${escapeHtml(dayTaskIds.join(','))}" draggable="false">${dayExport.label}</button>${(day.source_day_key || day.key) !== "__unscheduled__" ? `<button class="mini-btn" data-add-block-day="${escapeHtml(day.source_day_key || day.key || "")}" draggable="false">+</button><button class="mini-btn" data-rename-day="${escapeHtml(day.source_day_key || day.key || "")}" data-current-title="${escapeHtml(day.title || "")}" draggable="false">✎</button>` : ``}</div>`}
                 <div class="blocks">${blocks}</div>
               </div>
             `;
           }
           return `
-            <details class="tree day" data-tree-id="board-day-${escapeHtml(day.key || day.title)}" ${openAttr(`board-day-${day.key || day.title}`)}>
+            <details class="tree day" data-tree-id="board-day-${escapeHtml(day.key || day.title)}" data-drop-day-key="${escapeHtml(day.source_day_key || day.key || "")}" ${openAttr(`board-day-${day.key || day.title}`)}>
               <summary class="day-header" id="anchor-${escapeHtml(day.key || day.title)}" data-drop-day-key="${escapeHtml(day.source_day_key || day.key || "")}">
                 <button class="toggle" type="button" aria-label="Nyitas-zaras"></button>
                 <span>
@@ -847,32 +869,40 @@
         app.querySelectorAll(".task").forEach(taskEl => {
           taskEl.addEventListener("click", event => {
             const button = event.target.closest(".mini-btn");
-            if (button) return;
+            if (button && !event.target.closest("[data-task-drag]")) return;
             const recordId = taskEl.dataset.recordId || "";
             if (recordId) {
               sendAction({ action: "select_record", record_id: recordId });
             }
           });
-          taskEl.addEventListener("dragstart", event => {
-            dragRecordId = taskEl.dataset.recordId;
-            taskEl.classList.add("dragging");
+        });
+        app.querySelectorAll("[data-task-drag]").forEach(handleEl => {
+          handleEl.addEventListener("dragstart", event => {
+            const taskEl = handleEl.closest(".task");
+            dragRecordId = handleEl.dataset.taskDrag || (taskEl ? taskEl.dataset.recordId : "");
+            if (taskEl) taskEl.classList.add("dragging");
             event.dataTransfer.setData("text/plain", dragRecordId || "");
             event.dataTransfer.effectAllowed = "move";
           });
-          taskEl.addEventListener("dragend", () => {
+          handleEl.addEventListener("dragend", () => {
+            const taskEl = handleEl.closest(".task");
             dragRecordId = null;
-            taskEl.classList.remove("dragging");
+            if (taskEl) taskEl.classList.remove("dragging");
             app.querySelectorAll(".drag-over").forEach(node => node.classList.remove("drag-over"));
           });
         });
-        app.querySelectorAll("[data-block-id]").forEach(blockEl => {
-          blockEl.addEventListener("dragstart", event => {
-            dragBlockId = blockEl.dataset.blockId || "";
+        app.querySelectorAll("[data-block-id]").forEach(handleEl => {
+          handleEl.addEventListener("dragstart", event => {
+            dragBlockId = handleEl.dataset.blockId || "";
+            const bucketEl = handleEl.closest(".bucket") || handleEl.closest(".tree-drop");
+            if (bucketEl) bucketEl.classList.add("dragging");
             event.dataTransfer.setData("text/plain", dragBlockId || "");
             event.dataTransfer.effectAllowed = "move";
           });
-          blockEl.addEventListener("dragend", () => {
+          handleEl.addEventListener("dragend", () => {
             dragBlockId = null;
+            const bucketEl = handleEl.closest(".bucket") || handleEl.closest(".tree-drop");
+            if (bucketEl) bucketEl.classList.remove("dragging");
             app.querySelectorAll(".drag-over").forEach(node => node.classList.remove("drag-over"));
           });
         });

@@ -2738,241 +2738,290 @@ def render_execution_layout_manager(layout: dict, layout_path) -> None:
         st.caption("Kezzel felvett blokk torlese: a jobb oldali execution nezet napjanal a blokk melletti `x` gombbal.")
 
 
-def render_execution_graph(records: list[KnowledgeRecord], layout: dict, layout_path, source_dir, config, records_path, index_path, chroma_dir, history_path, export_selection_path, export_selected_ids: list[str]) -> None:
+def render_execution_graph(
+    records: list[KnowledgeRecord],
+    layout: dict,
+    layout_path,
+    source_dir,
+    config,
+    records_path,
+    index_path,
+    chroma_dir,
+    history_path,
+    export_selection_path,
+    export_selected_ids: list[str],
+    existing_values: dict[str, list[str]],
+    planning_options: list[str],
+    planning_titles: dict[str, str],
+) -> None:
     st.subheader("Execution Graph")
     st.caption("Vizuális, drag-and-drop planning felület hét -> nap -> blokk szerkezettel. A blokkhoz tartozó nap dátuma a task `due` mezőjével kerül összhangba, a `deadline` ettől független marad.")
     render_execution_layout_manager(layout, layout_path)
     pending_bucket = st.session_state.pop("pending_execution_filter_bucket", None)
     if pending_bucket is not None:
-        st.session_state["execution_filter_bucket"] = pending_bucket
+        st.session_state["execution_filter_buckets"] = [pending_bucket]
+    if st.session_state.pop("pending_show_execution_detail", False):
+        st.session_state["show_execution_detail"] = True
 
     with st.expander("Szűrés", expanded=False):
         filter_col1, filter_col2, filter_col3, filter_col4 = st.columns(4)
         exec_project = filter_col1.text_input("Projekt", key="execution_filter_project")
         exec_org = filter_col2.text_input("Munkahely / organization", key="execution_filter_org")
-        exec_status = filter_col3.selectbox("Státusz", [NONE_OPTION] + STATUS_OPTIONS, key="execution_filter_status")
-        exec_bucket = filter_col4.selectbox(
+        exec_statuses = filter_col3.multiselect(
+            "Státusz",
+            options=STATUS_OPTIONS,
+            default=st.session_state.get("execution_filter_statuses", []),
+            key="execution_filter_statuses",
+        )
+        exec_buckets = filter_col4.multiselect(
             "Tervezési hely",
-            [NONE_OPTION] + planning_bucket_options(layout),
-            format_func=lambda value: NONE_OPTION if value == NONE_OPTION else planning_bucket_label(value, planning_bucket_titles(layout)),
-            key="execution_filter_bucket",
+            options=planning_bucket_options(layout),
+            default=st.session_state.get("execution_filter_buckets", []),
+            format_func=lambda value: planning_bucket_label(value, planning_bucket_titles(layout)),
+            key="execution_filter_buckets",
         )
         filter_col5, filter_col6, filter_col7 = st.columns(3)
         exec_due_from = filter_col5.date_input("Due - tól", value=st.session_state.get("execution_filter_due_from"), key="execution_filter_due_from")
         exec_due_to = filter_col6.date_input("Due - ig", value=st.session_state.get("execution_filter_due_to"), key="execution_filter_due_to")
         exec_text = filter_col7.text_input("Szöveges szűrés", key="execution_filter_text")
         exec_only_with_content = st.checkbox("Csak ahol van tartalom", value=st.session_state.get("execution_only_with_content", False), key="execution_only_with_content")
+    show_execution_detail = st.toggle("Részletek panel", value=st.session_state.get("show_execution_detail", False), key="show_execution_detail")
+    board_host = st.container()
+    detail_host = None
+    if show_execution_detail:
+        board_host, detail_host = st.columns([2.2, 1.1])
 
-    task_records = [record for record in records if record.entity_type == "task" and record.status != "archived"]
-    filtered_task_records = task_records
-    if exec_project.strip():
-        needle = exec_project.strip().lower()
-        filtered_task_records = [record for record in filtered_task_records if needle in record.project.lower()]
-    if exec_org.strip():
-        needle = exec_org.strip().lower()
-        filtered_task_records = [record for record in filtered_task_records if needle in record.organization.lower()]
-    if exec_status != NONE_OPTION:
-        filtered_task_records = [record for record in filtered_task_records if record.status == exec_status]
-    if exec_bucket != NONE_OPTION:
-        filtered_task_records = [record for record in filtered_task_records if record.planning_bucket == exec_bucket]
-    if exec_due_from:
-        due_from_iso = exec_due_from.isoformat()
-        filtered_task_records = [record for record in filtered_task_records if record.due_at and record.due_at >= due_from_iso]
-    if exec_due_to:
-        due_to_iso = exec_due_to.isoformat()
-        filtered_task_records = [record for record in filtered_task_records if record.due_at and record.due_at <= due_to_iso]
-    if exec_text.strip():
-        needle = exec_text.strip().lower()
-        filtered_task_records = [
-            record
-            for record in filtered_task_records
-            if needle in record.title.lower()
-            or needle in record.summary.lower()
-            or needle in record.project.lower()
-            or needle in record.case_name.lower()
-            or needle in record.next_step.lower()
-        ]
+    with board_host:
+        task_records = [record for record in records if record.entity_type == "task" and record.status != "archived"]
+        filtered_task_records = task_records
+        if exec_project.strip():
+            needle = exec_project.strip().lower()
+            filtered_task_records = [record for record in filtered_task_records if needle in record.project.lower()]
+        if exec_org.strip():
+            needle = exec_org.strip().lower()
+            filtered_task_records = [record for record in filtered_task_records if needle in record.organization.lower()]
+        if exec_statuses:
+            filtered_task_records = [record for record in filtered_task_records if record.status in exec_statuses]
+        if exec_buckets:
+            filtered_task_records = [record for record in filtered_task_records if record.planning_bucket in exec_buckets]
+        if exec_due_from:
+            due_from_iso = exec_due_from.isoformat()
+            filtered_task_records = [record for record in filtered_task_records if record.due_at and record.due_at >= due_from_iso]
+        if exec_due_to:
+            due_to_iso = exec_due_to.isoformat()
+            filtered_task_records = [record for record in filtered_task_records if record.due_at and record.due_at <= due_to_iso]
+        if exec_text.strip():
+            needle = exec_text.strip().lower()
+            filtered_task_records = [
+                record
+                for record in filtered_task_records
+                if needle in record.title.lower()
+                or needle in record.summary.lower()
+                or needle in record.project.lower()
+                or needle in record.case_name.lower()
+                or needle in record.next_step.lower()
+            ]
 
-    if not filtered_task_records:
-        st.info("Meg nincs task rekord az execution graphhoz.")
-        return
-    st.session_state["export_visible_ids"] = [record.record_id for record in filtered_task_records]
+        if not filtered_task_records:
+            st.info("Meg nincs task rekord az execution graphhoz.")
+            return
+        st.session_state["export_visible_ids"] = [record.record_id for record in filtered_task_records]
 
-    export_selected_set = set(export_selected_ids)
-    component_payload = {
-        "sections": filter_execution_sections_by_content(build_execution_sections(layout), filtered_task_records, exec_only_with_content),
-        "selected_record_id": st.session_state.get("selected_record_id", ""),
-        "tasks": [
-            {
-                "record_id": record.record_id,
-                "title": record.title,
-                "project": record.project,
-                "case_name": record.case_name,
-                "planning_bucket": record.planning_bucket,
-                "due_at": record.due_at,
-                "focus_rank": record.focus_rank,
-                "next_step": record.next_step,
-                "next_step_estimate": record.next_step_estimate,
-                "estimate_minutes": estimate_to_minutes(record.next_step_estimate),
-                "export_selected": record.record_id in export_selected_set,
-            }
-            for record in filtered_task_records
-        ],
-    }
-    valid_task_ids = [record.record_id for record in filtered_task_records]
+        export_selected_set = set(export_selected_ids)
+        component_payload = {
+            "sections": filter_execution_sections_by_content(build_execution_sections(layout), filtered_task_records, exec_only_with_content),
+            "selected_record_id": st.session_state.get("selected_record_id", ""),
+            "tasks": [
+                {
+                    "record_id": record.record_id,
+                    "title": record.title,
+                    "project": record.project,
+                    "case_name": record.case_name,
+                    "planning_bucket": record.planning_bucket,
+                    "due_at": record.due_at,
+                    "focus_rank": record.focus_rank,
+                    "next_step": record.next_step,
+                    "next_step_estimate": record.next_step_estimate,
+                    "estimate_minutes": estimate_to_minutes(record.next_step_estimate),
+                    "export_selected": record.record_id in export_selected_set,
+                }
+                for record in filtered_task_records
+            ],
+        }
+        valid_task_ids = [record.record_id for record in filtered_task_records]
 
-    drag_result = execution_dnd_board(component_payload, key="execution_dnd_surface")
-    if isinstance(drag_result, dict) and drag_result.get("action") in {"move_task", "add_block", "remove_block", "rename_day", "rename_week", "toggle_export", "toggle_export_many", "move_block", "select_record"}:
-        event_id = str(drag_result.get("event_id", "")).strip()
-        if event_id and st.session_state.get("last_execution_drag_event") == event_id:
-            drag_result = None
-        elif event_id:
-            st.session_state["last_execution_drag_event"] = event_id
-    if isinstance(drag_result, dict) and drag_result.get("action") == "toggle_export":
-        record_id = str(drag_result.get("record_id", "")).strip()
-        if record_id:
-            toggle_export_selection(export_selection_path, record_id)
-            st.rerun()
-    if isinstance(drag_result, dict) and drag_result.get("action") == "toggle_export_many":
-        record_ids = [str(item).strip() for item in drag_result.get("record_ids", []) if str(item).strip()]
-        if record_ids:
-            current = set(load_export_selection(export_selection_path))
-            all_selected = all(record_id in current for record_id in record_ids)
-            next_ids = [record_id for record_id in current if record_id not in set(record_ids)] if all_selected else sorted(current | set(record_ids))
-            set_export_selection(export_selection_path, next_ids)
-            st.rerun()
-    if isinstance(drag_result, dict) and drag_result.get("action") == "select_record":
-        record_id = str(drag_result.get("record_id", "")).strip()
-        if record_id and record_id in {record.record_id for record in records}:
-            st.session_state["selected_record_id"] = record_id
-            st.session_state["execution_selected_record_id"] = record_id
-            if record_id in valid_task_ids:
-                st.session_state["execution_history_record_picker"] = record_id
-            st.rerun()
-    if isinstance(drag_result, dict) and drag_result.get("action") == "move_task":
-        record_id = str(drag_result.get("record_id", "")).strip()
-        planning_bucket = str(drag_result.get("planning_bucket", "")).strip()
-        dragged_record = next((record for record in task_records if record.record_id == record_id), None)
-        normalized_bucket = "" if planning_bucket == "__unscheduled__" else planning_bucket
-        if dragged_record and normalized_bucket != dragged_record.planning_bucket:
-            bucket_info = day_for_bucket(layout, normalized_bucket) if normalized_bucket else None
-            next_due = date.today().isoformat() if normalized_bucket == "main_focus" else (bucket_info.get("day_date") if bucket_info else None)
-            persist_record_fast(
-                update_record(
-                    dragged_record,
-                    planning_bucket=normalized_bucket,
-                    due_at=next_due,
-                    focus_rank=None,
-                ),
-                records_path,
-                history_path,
-                "Task áthelyezve.",
-            )
-    if isinstance(drag_result, dict) and drag_result.get("action") == "add_block":
-        day_key = str(drag_result.get("day_key", "")).strip()
-        title = str(drag_result.get("title", "")).strip()
-        if day_key and title:
-            persist_planning_layout(add_block(layout, day_key, title, "session"), layout_path)
-    if isinstance(drag_result, dict) and drag_result.get("action") == "rename_day":
-        day_key = str(drag_result.get("day_key", "")).strip()
-        title = str(drag_result.get("title", "")).strip()
-        if day_key and title and find_day(layout, day_key):
-            persist_planning_layout(rename_day(layout, day_key, title), layout_path)
-    if isinstance(drag_result, dict) and drag_result.get("action") == "rename_week":
-        week_key = str(drag_result.get("week_key", "")).strip()
-        title = str(drag_result.get("title", "")).strip()
-        if week_key and title:
-            persist_planning_layout(rename_week(layout, week_key, title), layout_path)
-    if isinstance(drag_result, dict) and drag_result.get("action") == "remove_block":
-        block_key = str(drag_result.get("block_key", "")).strip()
-        block_info = find_block(layout, block_key) if block_key else None
-        if block_info and block_info.get("lane") == "session":
-            must_bucket = must_bucket_for_day(layout, block_info.get("day_key", ""))
-            updated_records = records
-            if must_bucket:
+        drag_result = execution_dnd_board(component_payload, key="execution_dnd_surface")
+        if isinstance(drag_result, dict) and drag_result.get("action") in {"move_task", "add_block", "remove_block", "rename_day", "rename_week", "toggle_export", "toggle_export_many", "move_block", "select_record"}:
+            event_id = str(drag_result.get("event_id", "")).strip()
+            if event_id and st.session_state.get("last_execution_drag_event") == event_id:
+                drag_result = None
+            elif event_id:
+                st.session_state["last_execution_drag_event"] = event_id
+        if isinstance(drag_result, dict) and drag_result.get("action") == "toggle_export":
+            record_id = str(drag_result.get("record_id", "")).strip()
+            if record_id:
+                toggle_export_selection(export_selection_path, record_id)
+                st.rerun()
+        if isinstance(drag_result, dict) and drag_result.get("action") == "toggle_export_many":
+            record_ids = [str(item).strip() for item in drag_result.get("record_ids", []) if str(item).strip()]
+            if record_ids:
+                current = set(load_export_selection(export_selection_path))
+                all_selected = all(record_id in current for record_id in record_ids)
+                next_ids = [record_id for record_id in current if record_id not in set(record_ids)] if all_selected else sorted(current | set(record_ids))
+                set_export_selection(export_selection_path, next_ids)
+                st.rerun()
+        if isinstance(drag_result, dict) and drag_result.get("action") == "select_record":
+            record_id = str(drag_result.get("record_id", "")).strip()
+            if record_id and record_id in {record.record_id for record in records}:
+                st.session_state["selected_record_id"] = record_id
+                st.session_state["execution_selected_record_id"] = record_id
+                st.session_state["pending_show_execution_detail"] = True
+                if record_id in valid_task_ids:
+                    st.session_state["execution_history_record_picker"] = record_id
+                st.rerun()
+        if isinstance(drag_result, dict) and drag_result.get("action") == "move_task":
+            record_id = str(drag_result.get("record_id", "")).strip()
+            planning_bucket = str(drag_result.get("planning_bucket", "")).strip()
+            dragged_record = next((record for record in task_records if record.record_id == record_id), None)
+            normalized_bucket = "" if planning_bucket == "__unscheduled__" else planning_bucket
+            if dragged_record and normalized_bucket != dragged_record.planning_bucket:
+                bucket_info = day_for_bucket(layout, normalized_bucket) if normalized_bucket else None
+                next_due = date.today().isoformat() if normalized_bucket == "main_focus" else (bucket_info.get("day_date") if bucket_info else None)
+                persist_record_fast(
+                    update_record(
+                        dragged_record,
+                        planning_bucket=normalized_bucket,
+                        due_at=next_due,
+                        focus_rank=None,
+                    ),
+                    records_path,
+                    history_path,
+                    "Task áthelyezve.",
+                )
+        if isinstance(drag_result, dict) and drag_result.get("action") == "add_block":
+            day_key = str(drag_result.get("day_key", "")).strip()
+            title = str(drag_result.get("title", "")).strip()
+            if day_key and title:
+                persist_planning_layout(add_block(layout, day_key, title, "session"), layout_path)
+        if isinstance(drag_result, dict) and drag_result.get("action") == "rename_day":
+            day_key = str(drag_result.get("day_key", "")).strip()
+            title = str(drag_result.get("title", "")).strip()
+            if day_key and title and find_day(layout, day_key):
+                persist_planning_layout(rename_day(layout, day_key, title), layout_path)
+        if isinstance(drag_result, dict) and drag_result.get("action") == "rename_week":
+            week_key = str(drag_result.get("week_key", "")).strip()
+            title = str(drag_result.get("title", "")).strip()
+            if week_key and title:
+                persist_planning_layout(rename_week(layout, week_key, title), layout_path)
+        if isinstance(drag_result, dict) and drag_result.get("action") == "remove_block":
+            block_key = str(drag_result.get("block_key", "")).strip()
+            block_info = find_block(layout, block_key) if block_key else None
+            if block_info and block_info.get("lane") == "session":
+                must_bucket = must_bucket_for_day(layout, block_info.get("day_key", ""))
+                updated_records = records
+                if must_bucket:
+                    updated_records = [
+                        update_record(record, planning_bucket=must_bucket, due_at=block_info.get("day_date"))
+                        if record.planning_bucket == block_key
+                        else record
+                        for record in records
+                    ]
+                persist_layout_and_records(
+                    remove_block(layout, block_key),
+                    layout_path,
+                    updated_records,
+                    source_dir,
+                    config,
+                    records_path,
+                    index_path,
+                    chroma_dir,
+                    history_path,
+                    "Blokk törölve, a taskok aznapi Mindenképp blokkba kerültek.",
+                    fast=True,
+                )
+        if isinstance(drag_result, dict) and drag_result.get("action") == "move_block":
+            block_key = str(drag_result.get("block_key", "")).strip()
+            target_day_key = str(drag_result.get("target_day_key", "")).strip()
+            block_info = find_block(layout, block_key) if block_key else None
+            target_day = find_day(layout, target_day_key) if target_day_key else None
+            if block_info and target_day and block_info.get("lane") == "session" and block_info.get("day_key") != target_day_key:
                 updated_records = [
-                    update_record(record, planning_bucket=must_bucket, due_at=block_info.get("day_date"))
+                    update_record(record, due_at=target_day.get("date"))
                     if record.planning_bucket == block_key
                     else record
                     for record in records
                 ]
-            persist_layout_and_records(
-                remove_block(layout, block_key),
-                layout_path,
-                updated_records,
-                source_dir,
-                config,
-                records_path,
-                index_path,
-                chroma_dir,
-                history_path,
-                "Blokk törölve, a taskok aznapi Mindenképp blokkba kerültek.",
-                fast=True,
+                persist_layout_and_records(
+                    move_block_to_day(layout, block_key, target_day_key),
+                    layout_path,
+                    updated_records,
+                    source_dir,
+                    config,
+                    records_path,
+                    index_path,
+                    chroma_dir,
+                    history_path,
+                    "Blokk áthelyezve másik napra, a tartalmával együtt.",
+                    fast=True,
+                )
+
+        known_bucket_keys = {bucket.get("key", "") for bucket in iter_buckets(layout)}
+        orphan_tasks = [record for record in task_records if record.planning_bucket and record.planning_bucket not in known_bucket_keys]
+        if orphan_tasks:
+            st.warning("Van olyan task, ami már nem létező blokkba mutat. Ezeket érdemes újra elhelyezni.")
+            for record in orphan_tasks:
+                st.write(f"{record.title} -> {record.planning_bucket}")
+
+        st.divider()
+        st.markdown("**Task history**")
+        selected_execution_id = st.session_state.get("execution_selected_record_id")
+        global_selected_id = st.session_state.get("selected_record_id")
+        if global_selected_id in valid_task_ids and selected_execution_id != global_selected_id:
+            selected_execution_id = global_selected_id
+            st.session_state["execution_selected_record_id"] = selected_execution_id
+        if selected_execution_id not in valid_task_ids and valid_task_ids:
+            selected_execution_id = valid_task_ids[0]
+            st.session_state["execution_selected_record_id"] = selected_execution_id
+
+        if valid_task_ids:
+            selected_execution_id = st.selectbox(
+                "Task kiválasztása",
+                options=valid_task_ids,
+                index=valid_task_ids.index(selected_execution_id) if selected_execution_id in valid_task_ids else 0,
+                format_func=lambda record_id: record_label(next(record for record in filtered_task_records if record.record_id == record_id)),
+                key="execution_history_record_picker",
             )
-    if isinstance(drag_result, dict) and drag_result.get("action") == "move_block":
-        block_key = str(drag_result.get("block_key", "")).strip()
-        target_day_key = str(drag_result.get("target_day_key", "")).strip()
-        block_info = find_block(layout, block_key) if block_key else None
-        target_day = find_day(layout, target_day_key) if target_day_key else None
-        if block_info and target_day and block_info.get("lane") == "session" and block_info.get("day_key") != target_day_key:
-            updated_records = [
-                update_record(record, due_at=target_day.get("date"))
-                if record.planning_bucket == block_key
-                else record
-                for record in records
-            ]
-            persist_layout_and_records(
-                move_block_to_day(layout, block_key, target_day_key),
-                layout_path,
-                updated_records,
-                source_dir,
-                config,
-                records_path,
-                index_path,
-                chroma_dir,
-                history_path,
-                "Blokk áthelyezve másik napra, a tartalmával együtt.",
-                fast=True,
-            )
+            st.session_state["execution_selected_record_id"] = selected_execution_id
+            selected_task = next((record for record in filtered_task_records if record.record_id == selected_execution_id), None)
+            if selected_task:
+                action_col1, action_col2 = st.columns([1, 1])
+                if action_col1.button("Részlet", key=f"execution_open_detail_{selected_task.record_id}"):
+                    st.session_state["selected_record_id"] = selected_task.record_id
+                    st.session_state["pending_show_execution_detail"] = True
+                    st.rerun()
+                history_toggle_key = f"execution_show_history_{selected_task.record_id}"
+                if action_col2.button("History", key=f"execution_history_toggle_{selected_task.record_id}"):
+                    st.session_state[history_toggle_key] = not st.session_state.get(history_toggle_key, False)
+                if st.session_state.get(history_toggle_key, False):
+                    render_record_history(history_path, selected_task.record_id, key_prefix=f"execution_{selected_task.record_id}")
 
-    known_bucket_keys = {bucket.get("key", "") for bucket in iter_buckets(layout)}
-    orphan_tasks = [record for record in task_records if record.planning_bucket and record.planning_bucket not in known_bucket_keys]
-    if orphan_tasks:
-        st.warning("Van olyan task, ami már nem létező blokkba mutat. Ezeket érdemes újra elhelyezni.")
-        for record in orphan_tasks:
-            st.write(f"{record.title} -> {record.planning_bucket}")
-
-    st.divider()
-    st.markdown("**Task history**")
-    selected_execution_id = st.session_state.get("execution_selected_record_id")
-    global_selected_id = st.session_state.get("selected_record_id")
-    if global_selected_id in valid_task_ids and selected_execution_id != global_selected_id:
-        selected_execution_id = global_selected_id
-        st.session_state["execution_selected_record_id"] = selected_execution_id
-    if selected_execution_id not in valid_task_ids and valid_task_ids:
-        selected_execution_id = valid_task_ids[0]
-        st.session_state["execution_selected_record_id"] = selected_execution_id
-
-    if valid_task_ids:
-        selected_execution_id = st.selectbox(
-            "Task kiválasztása",
-            options=valid_task_ids,
-            index=valid_task_ids.index(selected_execution_id) if selected_execution_id in valid_task_ids else 0,
-            format_func=lambda record_id: record_label(next(record for record in filtered_task_records if record.record_id == record_id)),
-            key="execution_history_record_picker",
-        )
-        st.session_state["execution_selected_record_id"] = selected_execution_id
-        selected_task = next((record for record in filtered_task_records if record.record_id == selected_execution_id), None)
-        if selected_task:
-            action_col1, action_col2 = st.columns([1, 1])
-            if action_col1.button("Részlet", key=f"execution_open_detail_{selected_task.record_id}"):
-                st.session_state["selected_record_id"] = selected_task.record_id
-                st.rerun()
-            history_toggle_key = f"execution_show_history_{selected_task.record_id}"
-            if action_col2.button("History", key=f"execution_history_toggle_{selected_task.record_id}"):
-                st.session_state[history_toggle_key] = not st.session_state.get(history_toggle_key, False)
-            if st.session_state.get(history_toggle_key, False):
-                render_record_history(history_path, selected_task.record_id, key_prefix=f"execution_{selected_task.record_id}")
+    if detail_host is not None:
+        with detail_host:
+            detail_box = st.container(height=820, border=True)
+            with detail_box:
+                render_side_detail_panel(
+                    "execution_side",
+                    records,
+                    existing_values,
+                    planning_options,
+                    planning_titles,
+                    source_dir,
+                    config,
+                    records_path,
+                    index_path,
+                    chroma_dir,
+                    history_path,
+                )
 
 
 def render_record_history(history_path, record_id: str, key_prefix: str = "history") -> None:
@@ -3553,7 +3602,12 @@ def app() -> None:
             filter_col1, filter_col2, filter_col3, filter_col4 = st.columns(4)
             kanban_project = filter_col1.text_input("Projekt", key="kanban_filter_project")
             kanban_org = filter_col2.text_input("Munkahely / organization", key="kanban_filter_org")
-            kanban_status = filter_col3.selectbox("Státusz", [NONE_OPTION] + STATUS_OPTIONS, key="kanban_filter_status")
+            kanban_statuses = filter_col3.multiselect(
+                "Státusz",
+                options=STATUS_OPTIONS,
+                default=st.session_state.get("kanban_filter_statuses", []),
+                key="kanban_filter_statuses",
+            )
             kanban_entities = filter_col4.multiselect(
                 "Entitás",
                 options=["task", "case", "project"],
@@ -3578,8 +3632,8 @@ def app() -> None:
         if kanban_org.strip():
             needle = kanban_org.strip().lower()
             task_like = [record for record in task_like if needle in record.organization.lower()]
-        if kanban_status != NONE_OPTION:
-            task_like = [record for record in task_like if record.status == kanban_status]
+        if kanban_statuses:
+            task_like = [record for record in task_like if record.status in kanban_statuses]
         if kanban_entities:
             task_like = [record for record in task_like if record.entity_type in kanban_entities]
         if kanban_due_presence == "has":
@@ -3952,29 +4006,22 @@ def app() -> None:
                     st.warning(error)
 
     with tab_execution:
-        show_execution_detail = st.toggle("Részletek panel", value=st.session_state.get("show_execution_detail", False), key="show_execution_detail")
-        if show_execution_detail:
-            exec_col, exec_detail_col = st.columns([2.2, 1.1])
-            with exec_col:
-                render_execution_graph(records, planning_layout, planning_layout_path, source_dir, config, records_path, index_path, chroma_dir, history_events_path, export_selection_path, export_selected_ids)
-            with exec_detail_col:
-                detail_box = st.container(height=820, border=True)
-                with detail_box:
-                    render_side_detail_panel(
-                        "execution_side",
-                        records,
-                        existing_values,
-                        planning_options,
-                        planning_titles,
-                        source_dir,
-                        config,
-                        records_path,
-                        index_path,
-                        chroma_dir,
-                        history_events_path,
-                    )
-        else:
-            render_execution_graph(records, planning_layout, planning_layout_path, source_dir, config, records_path, index_path, chroma_dir, history_events_path, export_selection_path, export_selected_ids)
+        render_execution_graph(
+            records,
+            planning_layout,
+            planning_layout_path,
+            source_dir,
+            config,
+            records_path,
+            index_path,
+            chroma_dir,
+            history_events_path,
+            export_selection_path,
+            export_selected_ids,
+            existing_values,
+            planning_options,
+            planning_titles,
+        )
 
     with tab_mindmap:
         st.subheader("Context Graph")
