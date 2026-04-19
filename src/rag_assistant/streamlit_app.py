@@ -1095,10 +1095,12 @@ def render_gantt_view(records: list[KnowledgeRecord], export_selection_path: Pat
             persist_records_bulk(merged_records, source_dir, config, records_path, index_path, chroma_dir, history_events_path, f"GANTT változások mentve: {changed_count} rekord.")
 
 
-def get_selected_record(records: list[KnowledgeRecord]) -> KnowledgeRecord | None:
+def get_selected_record(records: list[KnowledgeRecord], preferred_record_id: str | None = None) -> KnowledgeRecord | None:
     if not records:
         return None
     lookup = {record.record_id: record for record in records}
+    if preferred_record_id and preferred_record_id in lookup:
+        return lookup[preferred_record_id]
     selected_id = st.session_state.get("selected_record_id")
     if selected_id in lookup:
         return lookup[selected_id]
@@ -1120,8 +1122,9 @@ def render_side_detail_panel(
     chroma_dir,
     history_events_path,
     allow_parent_edit: bool = True,
+    preferred_record_id: str | None = None,
 ) -> None:
-    selected_record = get_selected_record(records)
+    selected_record = get_selected_record(records, preferred_record_id=preferred_record_id)
     if not selected_record:
         st.info("Nincs kiválasztott rekord.")
         return
@@ -3021,6 +3024,7 @@ def render_execution_graph(
                     index_path,
                     chroma_dir,
                     history_path,
+                    preferred_record_id=st.session_state.get("execution_selected_record_id"),
                 )
 
 

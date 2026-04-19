@@ -372,6 +372,7 @@
       let latestPayload = null;
       let dragRecordId = null;
       let dragBlockId = null;
+      let suppressTaskClickUntil = 0;
 
       function postMessageToStreamlit(type, data) {
         window.parent.postMessage({ isStreamlitMessage: true, type, ...data }, "*");
@@ -710,7 +711,7 @@
             });
             const taskMarkup = entries.length
               ? entries.map(task => `
-                <div class="task" data-record-id="${escapeHtml(task.record_id)}" style="--bucket-accent:${style.accent};">
+                <div class="task" draggable="true" data-record-id="${escapeHtml(task.record_id)}" style="--bucket-accent:${style.accent};">
                   <div class="task-title" style="display:flex;align-items:center;justify-content:space-between;gap:8px;">
                     <span style="display:flex;align-items:center;gap:6px;">
                       <span class="mini-btn task-handle" data-task-drag="${escapeHtml(task.record_id)}" draggable="true" title="Task áthúzása">⇅</span>
@@ -868,6 +869,7 @@
 
         app.querySelectorAll(".task").forEach(taskEl => {
           taskEl.addEventListener("click", event => {
+            if (Date.now() < suppressTaskClickUntil) return;
             const button = event.target.closest(".mini-btn");
             if (button && !event.target.closest("[data-task-drag]")) return;
             const recordId = taskEl.dataset.recordId || "";
@@ -875,12 +877,26 @@
               sendAction({ action: "select_record", record_id: recordId });
             }
           });
+          taskEl.addEventListener("dragstart", event => {
+            dragRecordId = taskEl.dataset.recordId;
+            taskEl.classList.add("dragging");
+            suppressTaskClickUntil = Date.now() + 250;
+            event.dataTransfer.setData("text/plain", dragRecordId || "");
+            event.dataTransfer.effectAllowed = "move";
+          });
+          taskEl.addEventListener("dragend", () => {
+            dragRecordId = null;
+            taskEl.classList.remove("dragging");
+            suppressTaskClickUntil = Date.now() + 250;
+            app.querySelectorAll(".drag-over").forEach(node => node.classList.remove("drag-over"));
+          });
         });
         app.querySelectorAll("[data-task-drag]").forEach(handleEl => {
           handleEl.addEventListener("dragstart", event => {
             const taskEl = handleEl.closest(".task");
             dragRecordId = handleEl.dataset.taskDrag || (taskEl ? taskEl.dataset.recordId : "");
             if (taskEl) taskEl.classList.add("dragging");
+            suppressTaskClickUntil = Date.now() + 250;
             event.dataTransfer.setData("text/plain", dragRecordId || "");
             event.dataTransfer.effectAllowed = "move";
           });
@@ -888,6 +904,7 @@
             const taskEl = handleEl.closest(".task");
             dragRecordId = null;
             if (taskEl) taskEl.classList.remove("dragging");
+            suppressTaskClickUntil = Date.now() + 250;
             app.querySelectorAll(".drag-over").forEach(node => node.classList.remove("drag-over"));
           });
         });
