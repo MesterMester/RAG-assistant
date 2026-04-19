@@ -903,16 +903,7 @@ def render_gantt_view(records: list[KnowledgeRecord], export_selection_path: Pat
             or gantt_filter_text.strip().lower() in record.case_name.lower()
         )
     ]
-    if any(mode != "all" for mode in [gantt_filter_start, gantt_filter_due, gantt_filter_deadline, gantt_filter_relations]):
-        included_ids = {record.record_id for record in matched_records}
-        for record in list(matched_records):
-            parent_id = record.parent_id
-            while parent_id and parent_id in lookup_all and parent_id not in included_ids:
-                included_ids.add(parent_id)
-                parent_id = lookup_all[parent_id].parent_id
-        visible_records = [record for record in gantt_records if record.record_id in included_ids]
-    else:
-        visible_records = gantt_records
+    visible_records = matched_records
 
     if not visible_records:
         st.info("A jelenlegi GANTT-szűrésre nincs találat.")
@@ -1001,6 +992,8 @@ def render_gantt_view(records: list[KnowledgeRecord], export_selection_path: Pat
     .gantt-header, .gantt-row {{ display:grid; grid-template-columns: 220px 80px 96px 96px 96px 130px {len(units) * column_width}px; align-items:center; }}
     .gantt-header {{ position:sticky; top:0; z-index:20; background:#f8fafc; border-bottom:1px solid #e5e7eb; font-weight:700; }}
     .gantt-cell {{ padding:8px 10px; border-right:1px solid #eef2f7; font-size:12px; min-height:42px; display:flex; align-items:center; background:transparent; }}
+    .gantt-header > .gantt-cell:first-child {{ position:sticky; left:0; z-index:25; background:#f8fafc; box-shadow:2px 0 0 #eef2f7; }}
+    .gantt-row > .gantt-cell:first-child {{ position:sticky; left:0; z-index:5; background:#fff; box-shadow:2px 0 0 #eef2f7; }}
     .gantt-name {{ font-weight:600; }}
     .gantt-row {{ border-bottom:1px solid #f1f5f9; position:relative; z-index:0; }}
     .gantt-row.level-1 .gantt-name {{ padding-left:22px; }}
@@ -1136,6 +1129,7 @@ def render_side_detail_panel(
         if selected_record.next_step_estimate:
             meta_bits.append(f"⏱️ {selected_record.next_step_estimate}")
         st.caption(" | ".join(meta_bits))
+    action_placeholder = st.empty()
     edit_values = render_record_editor(
         f"{panel_key}_{selected_record.record_id}",
         records,
@@ -1146,11 +1140,12 @@ def render_side_detail_panel(
         allow_parent_edit=allow_parent_edit,
     )
     staged_record = record_from_editor_values(selected_record, edit_values)
-    action_col1, action_col2 = st.columns(2)
-    if action_col1.button("Save", key=f"{panel_key}_save_{selected_record.record_id}"):
-        persist_record(staged_record, source_dir, config, records_path, index_path, chroma_dir, history_events_path)
-    if action_col2.button("Cancel", key=f"{panel_key}_cancel_{selected_record.record_id}"):
-        st.rerun()
+    with action_placeholder.container():
+        action_col1, action_col2 = st.columns(2)
+        if action_col1.button("Save", key=f"{panel_key}_save_{selected_record.record_id}"):
+            persist_record(staged_record, source_dir, config, records_path, index_path, chroma_dir, history_events_path)
+        if action_col2.button("Cancel", key=f"{panel_key}_cancel_{selected_record.record_id}"):
+            st.rerun()
 
 
 def parse_optional_date(value: str | None) -> date | None:
@@ -1546,17 +1541,28 @@ def render_markdown_obsidian(records: list[KnowledgeRecord], all_records: list[K
 
     def lineage_records(record: KnowledgeRecord) -> list[KnowledgeRecord]:
         values: list[KnowledgeRecord] = []
+        seen_ids: set[str] = set()
+        current = all_lookup.get(record.parent_id) if record.parent_id else None
+        while current and current.record_id not in seen_ids:
+            values.append(current)
+            seen_ids.add(current.record_id)
+            current = all_lookup.get(current.parent_id) if current.parent_id else None
+        values.reverse()
+        hierarchy_matches: list[KnowledgeRecord] = []
         for candidate in all_records:
+            if candidate.record_id in seen_ids or candidate.record_id == record.record_id:
+                continue
             if candidate.entity_type == "organization" and (candidate.organization or candidate.title) == record.organization:
-                values.append(candidate)
+                hierarchy_matches.append(candidate)
             elif candidate.entity_type == "team" and (candidate.team or candidate.title) == record.team and candidate.organization == record.organization:
-                values.append(candidate)
+                hierarchy_matches.append(candidate)
             elif candidate.entity_type == "project" and (candidate.project or candidate.title) == record.project and candidate.team == record.team and candidate.organization == record.organization:
-                values.append(candidate)
+                hierarchy_matches.append(candidate)
             elif candidate.entity_type == "case" and (candidate.case_name or candidate.title) == record.case_name and candidate.project == record.project and candidate.team == record.team and candidate.organization == record.organization:
-                values.append(candidate)
-        order = {"organization": 0, "team": 1, "project": 2, "case": 3}
-        return sorted(values, key=lambda item: order.get(item.entity_type, 99))
+                hierarchy_matches.append(candidate)
+        order = {"organization": 0, "area": 1, "team": 2, "project": 3, "case": 4}
+        fallback = sorted(hierarchy_matches, key=lambda item: order.get(item.entity_type, 99))
+        return values or fallback
 
     def lineage_prefix(record: KnowledgeRecord) -> tuple[str, str]:
         lineage = lineage_records(record)
@@ -2019,7 +2025,7 @@ def render_record_editor(
     show_parent = allow_parent_edit
     show_schedule = entity_type in {"task", "case", "project", "decision", "note", "source_item"}
     show_event = entity_type == "event"
-    show_decision = entity_type in {"project", "case", "task", "decision", "note", "source_item"}
+    show_decision = True
     show_planning = entity_type in {"task", "case", "project", "decision", "note", "source_item", "event"}
     show_next_steps = entity_type == "task"
 
@@ -3601,6 +3607,8 @@ def app() -> None:
     with tab_kanban:
         st.subheader("Kanban nezet")
         st.caption("Drag-and-drop statuszvaltas task, case es project rekordokra. Az `inbox` itt `Backlog` neven jelenik meg.")
+        if st.session_state.pop("pending_show_kanban_detail", False):
+            st.session_state["show_kanban_detail"] = True
         show_kanban_detail = st.toggle("Részletek panel", value=st.session_state.get("show_kanban_detail", False), key="show_kanban_detail")
         with st.expander("Szűrés", expanded=False):
             filter_col1, filter_col2, filter_col3, filter_col4 = st.columns(4)
@@ -3711,6 +3719,8 @@ def app() -> None:
                     record_id = str(kanban_result.get("record_id", "")).strip()
                     if record_id and record_id in {record.record_id for record in records}:
                         st.session_state["selected_record_id"] = record_id
+                        st.session_state["kanban_selected_record_id"] = record_id
+                        st.session_state["pending_show_kanban_detail"] = True
                         st.rerun()
             if detail_host is not None:
                 with detail_host:
@@ -3728,6 +3738,7 @@ def app() -> None:
                             index_path,
                             chroma_dir,
                             history_events_path,
+                            preferred_record_id=st.session_state.get("kanban_selected_record_id"),
                         )
 
     with tab_timeline:
@@ -4115,7 +4126,11 @@ def app() -> None:
                     key="context_graph_panel_height",
                     format_func=lambda value: f"{value}px",
                 )
-                show_context_detail = st.session_state.get("show_context_detail", True)
+                show_context_detail = st.toggle(
+                    "Részletek panel",
+                    value=st.session_state.get("show_context_detail", True),
+                    key="show_context_detail",
+                )
                 graph_host = st.container()
                 editor_host = None
                 if show_context_detail:
