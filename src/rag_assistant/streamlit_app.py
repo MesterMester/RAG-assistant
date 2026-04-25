@@ -20,6 +20,7 @@ from rag_assistant.history import append_event, load_events, summarize_event
 from rag_assistant.index_store import load_index, save_index
 from rag_assistant.ingest import build_index
 from rag_assistant.kanban_dnd_component import kanban_dnd_board
+from rag_assistant.markdown_editor_component import markdown_editor
 from rag_assistant.models import KnowledgeRecord, utc_now_iso
 from rag_assistant.planning_layout import (
     add_block,
@@ -246,6 +247,8 @@ def record_from_editor_values(existing: KnowledgeRecord, edit_values: dict) -> K
             case_name=edit_values["case_name"],
             parent_id=edit_values["parent_id"],
             related_people=edit_values["related_people"],
+            web_links=edit_values["web_links"],
+            obsidian_links=edit_values["obsidian_links"],
             tags=edit_values["tags"],
             relations=graph_edges_to_relations(edit_values["graph_edges"]),
             graph_edges=edit_values["graph_edges"],
@@ -279,6 +282,8 @@ def editor_values_dirty(existing: KnowledgeRecord, edit_values: dict) -> bool:
         "case_name": edit_values["case_name"],
         "parent_id": edit_values["parent_id"],
         "related_people": edit_values["related_people"],
+        "web_links": edit_values["web_links"],
+        "obsidian_links": edit_values["obsidian_links"],
         "tags": edit_values["tags"],
         "graph_edges": normalize_graph_edges(edit_values["graph_edges"], self_id=existing.record_id),
         "decision_needed": edit_values["decision_needed"],
@@ -307,6 +312,8 @@ def editor_values_dirty(existing: KnowledgeRecord, edit_values: dict) -> bool:
         "case_name": existing.case_name,
         "parent_id": existing.parent_id,
         "related_people": existing.related_people,
+        "web_links": existing.web_links,
+        "obsidian_links": existing.obsidian_links,
         "tags": existing.tags,
         "graph_edges": normalize_graph_edges(existing.graph_edges, existing.relations, existing.record_id),
         "decision_needed": existing.decision_needed,
@@ -829,7 +836,7 @@ def matches_presence_filter(value: str | None, mode: str) -> bool:
     return True
 
 
-def render_gantt_view(records: list[KnowledgeRecord], export_selection_path: Path, source_dir, config, records_path, index_path, chroma_dir, history_events_path) -> None:
+def render_gantt_view(records: list[KnowledgeRecord], export_selection_path: Path, source_dir, config, records_path, index_path, chroma_dir, history_events_path, existing_values: dict[str, list[str]]) -> None:
     st.subheader("GANTT")
     gantt_records = [record for record in records if record.status != "archived" and record.entity_type in {"area", "organization", "team", "project", "case", "task"}]
     if not gantt_records:
@@ -864,13 +871,44 @@ def render_gantt_view(records: list[KnowledgeRecord], export_selection_path: Pat
             format_func=lambda value: presence_labels[value],
             key="gantt_filter_relations",
         )
-        text_col1, text_col2 = st.columns(2)
+        text_col1, text_col2, text_col3 = st.columns(3)
         gantt_filter_text = text_col1.text_input("Szöveges szűrés", key="gantt_filter_text")
         gantt_filter_entity = text_col2.multiselect(
             "Típus",
             options=["area", "organization", "team", "project", "case", "task"],
             default=st.session_state.get("gantt_filter_entity", ["area", "organization", "team", "project", "case", "task"]),
             key="gantt_filter_entity",
+        )
+        gantt_filter_status = text_col3.multiselect(
+            "Státusz",
+            options=STATUS_OPTIONS,
+            default=st.session_state.get("gantt_filter_status", []),
+            key="gantt_filter_status",
+        )
+        scope_col1, scope_col2, scope_col3, scope_col4 = st.columns(4)
+        gantt_filter_orgs = scope_col1.multiselect(
+            "Munkahely / organization",
+            options=existing_values["organization"],
+            default=st.session_state.get("gantt_filter_orgs", []),
+            key="gantt_filter_orgs",
+        )
+        gantt_filter_teams = scope_col2.multiselect(
+            "Team",
+            options=existing_values["team"],
+            default=st.session_state.get("gantt_filter_teams", []),
+            key="gantt_filter_teams",
+        )
+        gantt_filter_projects = scope_col3.multiselect(
+            "Projekt",
+            options=existing_values["project"],
+            default=st.session_state.get("gantt_filter_projects", []),
+            key="gantt_filter_projects",
+        )
+        gantt_filter_cases = scope_col4.multiselect(
+            "Ügy",
+            options=existing_values["case_name"],
+            default=st.session_state.get("gantt_filter_cases", []),
+            key="gantt_filter_cases",
         )
 
     scale = st.selectbox(
@@ -889,6 +927,11 @@ def render_gantt_view(records: list[KnowledgeRecord], export_selection_path: Pat
         record
         for record in gantt_records
         if (not gantt_filter_entity or record.entity_type in gantt_filter_entity)
+        if (not gantt_filter_status or record.status in gantt_filter_status)
+        if (not gantt_filter_orgs or record.organization in gantt_filter_orgs)
+        if (not gantt_filter_teams or record.team in gantt_filter_teams)
+        if (not gantt_filter_projects or record.project in gantt_filter_projects)
+        if (not gantt_filter_cases or record.case_name in gantt_filter_cases)
         if matches_presence_filter(record.start_at, gantt_filter_start)
         and matches_presence_filter(record.due_at, gantt_filter_due)
         and matches_presence_filter(record.deadline, gantt_filter_deadline)
@@ -933,6 +976,12 @@ def render_gantt_view(records: list[KnowledgeRecord], export_selection_path: Pat
         for index, value in enumerate(units)
         if scale == "day" and value.weekday() >= 5
     )
+    today_idx = gantt_index_for(date.today(), units, scale)
+    today_marker_html = (
+        f'<div class="gantt-today-line" style="left:{today_idx * column_width + column_width / 2 - 1}px;"></div>'
+        if today_idx is not None
+        else ""
+    )
 
     def marker_html(record: KnowledgeRecord) -> str:
         start_idx = gantt_index_for(parse_optional_date(record.start_at), units, scale)
@@ -965,7 +1014,7 @@ def render_gantt_view(records: list[KnowledgeRecord], export_selection_path: Pat
           <div class="gantt-cell">{escape(record.due_at or "-")}</div>
           <div class="gantt-cell">{escape(record.deadline or "-")}</div>
           <div class="gantt-cell">{escape(relation_summary(record))}</div>
-          <div class="gantt-timeline" style="width:{len(units) * column_width}px;">{weekend_overlay_html}{marker_html(record)}</div>
+          <div class="gantt-timeline" style="width:{len(units) * column_width}px;">{weekend_overlay_html}{today_marker_html}{marker_html(record)}</div>
         </div>
         """
 
@@ -1001,6 +1050,7 @@ def render_gantt_view(records: list[KnowledgeRecord], export_selection_path: Pat
     .gantt-tree-icon {{ display:inline-block; width:14px; color:#475569; }}
     .gantt-timeline {{ position:relative; height:42px; background-image: linear-gradient(to right, #eef2f7 1px, transparent 1px); background-size:{column_width}px 100%; overflow:hidden; }}
     .gantt-weekend-bg {{ position:absolute; top:0; bottom:0; background:#f1f5f9; z-index:0; }}
+    .gantt-today-line {{ position:absolute; top:0; bottom:0; width:2px; background:#dc2626; z-index:3; opacity:0.95; }}
     .gantt-span {{ position:absolute; top:16px; height:10px; border-radius:999px; background:rgba(59,130,246,0.16); border:1px solid rgba(59,130,246,0.28); z-index:1; }}
     .gantt-mark {{ position:absolute; top:8px; font-size:16px; line-height:1; z-index:2; }}
     .gantt-mark.start {{ color:#2563eb; }}
@@ -1102,6 +1152,22 @@ def get_selected_record(records: list[KnowledgeRecord], preferred_record_id: str
     return selected
 
 
+def render_record_links(record: KnowledgeRecord, key_prefix: str = "links") -> None:
+    web_links = [item for item in record.web_links if item]
+    obsidian_links = [item for item in record.obsidian_links if item]
+    if not web_links and not obsidian_links:
+        return
+    with st.expander("Hivatkozások", expanded=False):
+        if web_links:
+            st.markdown("**Web**")
+            for index, link in enumerate(web_links):
+                st.markdown(f"- [{link}]({link})")
+        if obsidian_links:
+            st.markdown("**Obsidian**")
+            for index, link in enumerate(obsidian_links):
+                st.markdown(f"- [{link}]({link})")
+
+
 def render_side_detail_panel(
     panel_key: str,
     records: list[KnowledgeRecord],
@@ -1122,6 +1188,7 @@ def render_side_detail_panel(
         st.info("Nincs kiválasztott rekord.")
         return
     st.caption(f"Kijelölt rekord: {record_label(selected_record)}")
+    render_record_links(selected_record, key_prefix=f"{panel_key}_{selected_record.record_id}")
     if selected_record.entity_type == "task" and (selected_record.next_step or selected_record.next_step_estimate):
         meta_bits = []
         if selected_record.next_step:
@@ -1330,7 +1397,7 @@ def combine_estimate_parts(hours: int, minutes: int) -> str:
 
 def minutes_to_keycap(value: int | None) -> str:
     if value is None:
-        return "🤖"
+        return ""
     mapping = {
         "0": "0️⃣",
         "1": "1️⃣",
@@ -1343,7 +1410,8 @@ def minutes_to_keycap(value: int | None) -> str:
         "8": "8️⃣",
         "9": "9️⃣",
     }
-    return "".join(mapping.get(ch, ch) for ch in str(value))
+    normalized = f"{int(value):02d}"
+    return "".join(mapping.get(ch, ch) for ch in normalized)
 
 
 def markdown_import_entity(line: str) -> tuple[str, str, str]:
@@ -1579,10 +1647,11 @@ def render_markdown_obsidian(records: list[KnowledgeRecord], all_records: list[K
         prefix_head = " ".join(prefix_bits)
         body = f"{prefix_head}: {title}" if prefix_head else title
         if record.entity_type == "task":
-            return ("- [x] " if record.status == "done" else "- [ ] ") + f"{estimate_prefix} | {body}"
+            estimate_head = f"{estimate_prefix} | " if estimate_prefix else ""
+            return ("- [x] " if record.status == "done" else "- [ ] ") + f"{estimate_head}{body}"
         if record.entity_type == "event":
-            return f"- 🤖🗓️ | {body}"
-        return f"- 🤖 | {body}"
+            return f"- 🗓️ | {body}"
+        return f"- {body}"
 
     def walk(record: KnowledgeRecord, depth: int, allow_children: bool) -> None:
         indent = "\t" * depth
@@ -1700,6 +1769,8 @@ def record_from_table_row(row: dict, existing: KnowledgeRecord) -> KnowledgeReco
         case_name=normalize_table_value(row.get("case")),
         parent_id=normalize_table_value(row.get("parent_id")),
         related_people=parse_csv_list(normalize_table_value(row.get("people"))),
+        web_links=parse_csv_list(normalize_table_value(row.get("web_links"))),
+        obsidian_links=parse_csv_list(normalize_table_value(row.get("obsidian_links"))),
         tags=parse_csv_list(normalize_table_value(row.get("tags"))),
         decision_needed=bool(row.get("decision_needed")),
         abbreviation=normalize_table_value(row.get("abbreviation")),
@@ -2128,12 +2199,39 @@ def render_record_editor(
     abbreviation = meta_col1.text_input("Rövidítés", value=record.abbreviation, key=f"{key_prefix}_abbreviation")
     icon = meta_col2.text_input("Ikon", value=record.icon, key=f"{key_prefix}_icon", placeholder="pl. 🟡")
     with st.expander("Jegyzet", expanded=False):
-        content = st.text_area(
-            "Markdown jegyzet",
-            value=record.content,
-            height=320,
-            help="A sima beillesztett markdown itt nyers markdownkent mentodik el. Később egy gazdagabb editor is ugyanebből tud dolgozni.",
-            key=f"{key_prefix}_content",
+        note_toggle_col1, note_toggle_col2 = st.columns(2)
+        note_large = note_toggle_col1.toggle("Nagy nézet", value=st.session_state.get(f"{key_prefix}_content_large", False), key=f"{key_prefix}_content_large")
+        note_preview = note_toggle_col2.toggle("Markdown preview", value=st.session_state.get(f"{key_prefix}_content_preview", False), key=f"{key_prefix}_content_preview")
+        content = markdown_editor(
+            {
+                "label": "Markdown jegyzet",
+                "value": record.content,
+                "show_preview": note_preview,
+                "editor_height": 860 if note_large else 340,
+                "preview_height": 860 if note_large else 340,
+            },
+            key=f"{key_prefix}_content_editor",
+        )
+        content = str(content or record.content or "")
+    with st.expander("Linkek", expanded=False):
+        link_col1, link_col2 = st.columns(2)
+        web_links_df = pd.DataFrame({"url": record.web_links or [""]})
+        edited_web_links = link_col1.data_editor(
+            web_links_df,
+            use_container_width=True,
+            hide_index=True,
+            num_rows="dynamic",
+            key=f"{key_prefix}_web_links",
+            column_config={"url": st.column_config.TextColumn("Webes link", help="https://...")},
+        )
+        obsidian_links_df = pd.DataFrame({"url": record.obsidian_links or [""]})
+        edited_obsidian_links = link_col2.data_editor(
+            obsidian_links_df,
+            use_container_width=True,
+            hide_index=True,
+            num_rows="dynamic",
+            key=f"{key_prefix}_obsidian_links",
+            column_config={"url": st.column_config.TextColumn("Obsidian link", help="obsidian://open?... vagy obsidian://advanced-uri?...")},
         )
 
     tag_col, relation_col = st.columns(2)
@@ -2232,6 +2330,8 @@ def render_record_editor(
         "case_name": hierarchy_values["case_name"].strip(),
         "parent_id": parent_id.strip(),
         "related_people": [item.strip() for item in people_raw.split(",") if item.strip()],
+        "web_links": [str(item).strip() for item in edited_web_links.get("url", []).tolist() if str(item).strip()],
+        "obsidian_links": [str(item).strip() for item in edited_obsidian_links.get("url", []).tolist() if str(item).strip()],
         "summary": summary.strip(),
         "content": content.strip(),
         "tags": [item.strip() for item in tags_raw.split(",") if item.strip()],
@@ -2371,8 +2471,10 @@ def filter_context_graph_records(
     records: list[KnowledgeRecord],
     entity_filters: list[str],
     status_filters: list[str],
-    project_filter: str,
-    case_filter: str,
+    organization_filters: list[str],
+    team_filters: list[str],
+    project_filters: list[str],
+    case_filters: list[str],
     text_filter: str,
     active_only: bool,
     due_from: date | None,
@@ -2383,12 +2485,14 @@ def filter_context_graph_records(
         filtered = [record for record in filtered if record.entity_type in entity_filters]
     if status_filters:
         filtered = [record for record in filtered if record.status in status_filters]
-    if project_filter.strip():
-        needle = project_filter.strip().lower()
-        filtered = [record for record in filtered if needle in record.project.lower()]
-    if case_filter.strip():
-        needle = case_filter.strip().lower()
-        filtered = [record for record in filtered if needle in record.case_name.lower()]
+    if organization_filters:
+        filtered = [record for record in filtered if record.organization in organization_filters]
+    if team_filters:
+        filtered = [record for record in filtered if record.team in team_filters]
+    if project_filters:
+        filtered = [record for record in filtered if record.project in project_filters]
+    if case_filters:
+        filtered = [record for record in filtered if record.case_name in case_filters]
     if text_filter.strip():
         needle = text_filter.strip().lower()
         filtered = [
@@ -2459,6 +2563,8 @@ def build_context_graph_payload(records: list[KnowledgeRecord], selected_node_id
             "export_selected": node_id in export_selected,
             "icon": "" if synthetic or not record else record.icon,
             "has_note": False if synthetic or not record else bool(record.content.strip()),
+            "has_web_links": False if synthetic or not record else bool(record.web_links),
+            "has_obsidian_links": False if synthetic or not record else bool(record.obsidian_links),
             "next_step": "" if synthetic or not record else record.next_step,
             "next_step_estimate": "" if synthetic or not record else record.next_step_estimate,
             "hierarchy_level": 4,
@@ -2553,27 +2659,26 @@ def build_context_graph_payload(records: list[KnowledgeRecord], selected_node_id
                         label=edge.get("label", ""),
                     )
 
-    hierarchy_nodes = [node["id"] for node in nodes.values()]
-    incoming_counts = {node_id: 0 for node_id in hierarchy_nodes}
-    outgoing_edges: dict[str, list[str]] = {node_id: [] for node_id in hierarchy_nodes}
-    for edge in edges:
-        if edge["kind"] != "hierarchy":
-            continue
-        if edge["source"] in incoming_counts and edge["target"] in incoming_counts:
-            incoming_counts[edge["target"]] += 1
-            outgoing_edges.setdefault(edge["source"], []).append(edge["target"])
-    queue: list[tuple[str, int]] = [(node_id, 0) for node_id, count in incoming_counts.items() if count == 0]
-    visited_depths: dict[str, int] = {}
-    while queue:
-        node_id, depth = queue.pop(0)
-        known = visited_depths.get(node_id)
-        if known is not None and known <= depth:
-            continue
-        visited_depths[node_id] = depth
-        for child_id in outgoing_edges.get(node_id, []):
-            queue.append((child_id, depth + 1))
+    def actual_hierarchy_depth(record_id: str) -> int:
+        record = record_by_id.get(record_id)
+        if not record:
+            return 3
+        if record.entity_type == "task":
+            return 3
+        depth = 0
+        seen_ids: set[str] = set()
+        current = record
+        while current.parent_id and current.parent_id in record_by_id and current.parent_id not in seen_ids:
+            seen_ids.add(current.parent_id)
+            depth += 1
+            current = record_by_id[current.parent_id]
+        return min(3, depth)
+
     for node_id, node in nodes.items():
-        node["hierarchy_level"] = min(3, visited_depths.get(node_id, 3))
+        if node_id in record_by_id:
+            node["hierarchy_level"] = actual_hierarchy_depth(node_id)
+        else:
+            node["hierarchy_level"] = 3
 
     return {
         "mode": mode,
@@ -2774,25 +2879,47 @@ def render_execution_graph(
 
     with st.expander("Szűrés", expanded=False):
         filter_col1, filter_col2, filter_col3, filter_col4 = st.columns(4)
-        exec_project = filter_col1.text_input("Projekt", key="execution_filter_project")
-        exec_org = filter_col2.text_input("Munkahely / organization", key="execution_filter_org")
-        exec_statuses = filter_col3.multiselect(
+        exec_orgs = filter_col1.multiselect(
+            "Munkahely / organization",
+            options=existing_values["organization"],
+            default=st.session_state.get("execution_filter_orgs", []),
+            key="execution_filter_orgs",
+        )
+        exec_teams = filter_col2.multiselect(
+            "Team",
+            options=existing_values["team"],
+            default=st.session_state.get("execution_filter_teams", []),
+            key="execution_filter_teams",
+        )
+        exec_projects = filter_col3.multiselect(
+            "Projekt",
+            options=existing_values["project"],
+            default=st.session_state.get("execution_filter_projects", []),
+            key="execution_filter_projects",
+        )
+        exec_cases = filter_col4.multiselect(
+            "Ügy",
+            options=existing_values["case_name"],
+            default=st.session_state.get("execution_filter_cases", []),
+            key="execution_filter_cases",
+        )
+        filter_col5, filter_col6, filter_col7, filter_col8 = st.columns(4)
+        exec_statuses = filter_col5.multiselect(
             "Státusz",
             options=STATUS_OPTIONS,
             default=st.session_state.get("execution_filter_statuses", []),
             key="execution_filter_statuses",
         )
-        exec_buckets = filter_col4.multiselect(
+        exec_buckets = filter_col6.multiselect(
             "Tervezési hely",
             options=planning_bucket_options(layout),
             default=st.session_state.get("execution_filter_buckets", []),
             format_func=lambda value: planning_bucket_label(value, planning_bucket_titles(layout)),
             key="execution_filter_buckets",
         )
-        filter_col5, filter_col6, filter_col7 = st.columns(3)
-        exec_due_from = filter_col5.date_input("Due - tól", value=st.session_state.get("execution_filter_due_from"), key="execution_filter_due_from")
-        exec_due_to = filter_col6.date_input("Due - ig", value=st.session_state.get("execution_filter_due_to"), key="execution_filter_due_to")
-        exec_text = filter_col7.text_input("Szöveges szűrés", key="execution_filter_text")
+        exec_due_from = filter_col7.date_input("Due - tól", value=st.session_state.get("execution_filter_due_from"), key="execution_filter_due_from")
+        exec_due_to = filter_col8.date_input("Due - ig", value=st.session_state.get("execution_filter_due_to"), key="execution_filter_due_to")
+        exec_text = st.text_input("Szöveges szűrés", key="execution_filter_text")
         exec_only_with_content = st.checkbox("Csak ahol van tartalom", value=st.session_state.get("execution_only_with_content", False), key="execution_only_with_content")
     show_execution_detail = st.toggle("Részletek panel", value=st.session_state.get("show_execution_detail", False), key="show_execution_detail")
     board_host = st.container()
@@ -2803,12 +2930,14 @@ def render_execution_graph(
     with board_host:
         task_records = [record for record in records if record.entity_type == "task" and record.status != "archived"]
         filtered_task_records = task_records
-        if exec_project.strip():
-            needle = exec_project.strip().lower()
-            filtered_task_records = [record for record in filtered_task_records if needle in record.project.lower()]
-        if exec_org.strip():
-            needle = exec_org.strip().lower()
-            filtered_task_records = [record for record in filtered_task_records if needle in record.organization.lower()]
+        if exec_orgs:
+            filtered_task_records = [record for record in filtered_task_records if record.organization in exec_orgs]
+        if exec_teams:
+            filtered_task_records = [record for record in filtered_task_records if record.team in exec_teams]
+        if exec_projects:
+            filtered_task_records = [record for record in filtered_task_records if record.project in exec_projects]
+        if exec_cases:
+            filtered_task_records = [record for record in filtered_task_records if record.case_name in exec_cases]
         if exec_statuses:
             filtered_task_records = [record for record in filtered_task_records if record.status in exec_statuses]
         if exec_buckets:
@@ -3255,6 +3384,8 @@ def app() -> None:
                     case_name=create_values["case_name"],
                     parent_id=create_values["parent_id"],
                     related_people=create_values["related_people"],
+                    web_links=create_values["web_links"],
+                    obsidian_links=create_values["obsidian_links"],
                     tags=create_values["tags"],
                     relations=graph_edges_to_relations(create_values["graph_edges"]),
                     graph_edges=create_values["graph_edges"],
@@ -3294,6 +3425,7 @@ def app() -> None:
             st.caption(f"ID: {selected_record.record_id}")
             st.write(f"Létrehozva: {selected_record.created_at}")
             st.write(f"Utoljára frissítve: {selected_record.updated_at}")
+            render_record_links(selected_record, key_prefix=f"detail_{selected_record.record_id}")
             history_toggle_key = f"show_history_{selected_record.record_id}"
             if st.button("History", key=f"detail_history_toggle_{selected_record.record_id}"):
                 st.session_state[history_toggle_key] = not st.session_state.get(history_toggle_key, False)
@@ -3322,6 +3454,8 @@ def app() -> None:
                     case_name=edit_values["case_name"],
                     parent_id=edit_values["parent_id"],
                     related_people=edit_values["related_people"],
+                    web_links=edit_values["web_links"],
+                    obsidian_links=edit_values["obsidian_links"],
                     tags=edit_values["tags"],
                     relations=graph_edges_to_relations(edit_values["graph_edges"]),
                     graph_edges=edit_values["graph_edges"],
@@ -3360,12 +3494,32 @@ def app() -> None:
                 default=st.session_state.get("table_filter_status", []),
                 key="table_filter_status",
             )
-            filter_organization = filter_col4.text_input("Organization szures", key="table_filter_organization")
-            filter_team = filter_col4.text_input("Team szures", key="table_filter_team")
+            filter_organization = filter_col4.multiselect(
+                "Organization szures",
+                existing_values["organization"],
+                default=st.session_state.get("table_filter_organization", []),
+                key="table_filter_organization",
+            )
+            filter_team = filter_col4.multiselect(
+                "Team szures",
+                existing_values["team"],
+                default=st.session_state.get("table_filter_team", []),
+                key="table_filter_team",
+            )
 
             filter_col5, filter_col6, filter_col7, filter_col8 = st.columns(4)
-            filter_project = filter_col5.text_input("Projekt szures", key="table_filter_project")
-            filter_case = filter_col6.text_input("Ugy szures", key="table_filter_case")
+            filter_project = filter_col5.multiselect(
+                "Projekt szures",
+                existing_values["project"],
+                default=st.session_state.get("table_filter_project", []),
+                key="table_filter_project",
+            )
+            filter_case = filter_col6.multiselect(
+                "Ugy szures",
+                existing_values["case_name"],
+                default=st.session_state.get("table_filter_case", []),
+                key="table_filter_case",
+            )
             filter_planning_bucket = filter_col7.multiselect(
                 "Tervezesi hely szures",
                 planning_options,
@@ -3416,18 +3570,14 @@ def app() -> None:
                 filtered_records = [record for record in filtered_records if record.entity_type in filter_entity]
             if filter_status:
                 filtered_records = [record for record in filtered_records if record.status in filter_status]
-            if filter_organization.strip():
-                needle = filter_organization.strip().lower()
-                filtered_records = [record for record in filtered_records if needle in record.organization.lower()]
-            if filter_team.strip():
-                needle = filter_team.strip().lower()
-                filtered_records = [record for record in filtered_records if needle in record.team.lower()]
-            if filter_project.strip():
-                needle = filter_project.strip().lower()
-                filtered_records = [record for record in filtered_records if needle in record.project.lower()]
-            if filter_case.strip():
-                needle = filter_case.strip().lower()
-                filtered_records = [record for record in filtered_records if needle in record.case_name.lower()]
+            if filter_organization:
+                filtered_records = [record for record in filtered_records if record.organization in filter_organization]
+            if filter_team:
+                filtered_records = [record for record in filtered_records if record.team in filter_team]
+            if filter_project:
+                filtered_records = [record for record in filtered_records if record.project in filter_project]
+            if filter_case:
+                filtered_records = [record for record in filtered_records if record.case_name in filter_case]
             if filter_planning_bucket:
                 filtered_records = [record for record in filtered_records if record.planning_bucket in filter_planning_bucket]
             if filter_text.strip():
@@ -3612,25 +3762,48 @@ def app() -> None:
         show_kanban_detail = st.toggle("Részletek panel", value=st.session_state.get("show_kanban_detail", False), key="show_kanban_detail")
         with st.expander("Szűrés", expanded=False):
             filter_col1, filter_col2, filter_col3, filter_col4 = st.columns(4)
-            kanban_project = filter_col1.text_input("Projekt", key="kanban_filter_project")
-            kanban_org = filter_col2.text_input("Munkahely / organization", key="kanban_filter_org")
-            kanban_statuses = filter_col3.multiselect(
+            kanban_orgs = filter_col1.multiselect(
+                "Munkahely / organization",
+                options=existing_values["organization"],
+                default=st.session_state.get("kanban_filter_orgs", []),
+                key="kanban_filter_orgs",
+            )
+            kanban_teams = filter_col2.multiselect(
+                "Team",
+                options=existing_values["team"],
+                default=st.session_state.get("kanban_filter_teams", []),
+                key="kanban_filter_teams",
+            )
+            kanban_projects = filter_col3.multiselect(
+                "Projekt",
+                options=existing_values["project"],
+                default=st.session_state.get("kanban_filter_projects", []),
+                key="kanban_filter_projects",
+            )
+            kanban_cases = filter_col4.multiselect(
+                "Ügy",
+                options=existing_values["case_name"],
+                default=st.session_state.get("kanban_filter_cases", []),
+                key="kanban_filter_cases",
+            )
+            filter_col5, filter_col6, filter_col7, filter_col8 = st.columns(4)
+            kanban_statuses = filter_col5.multiselect(
                 "Státusz",
                 options=STATUS_OPTIONS,
                 default=st.session_state.get("kanban_filter_statuses", []),
                 key="kanban_filter_statuses",
             )
-            kanban_entities = filter_col4.multiselect(
+            kanban_entities = filter_col6.multiselect(
                 "Entitás",
                 options=["task", "case", "project"],
                 default=st.session_state.get("kanban_filter_entities", []),
                 key="kanban_filter_entities",
             )
-            filter_col5, filter_col6, filter_col7, filter_col8 = st.columns(4)
-            kanban_due_from = filter_col5.date_input("Due - tól", value=st.session_state.get("kanban_filter_due_from"), key="kanban_filter_due_from")
-            kanban_due_to = filter_col6.date_input("Due - ig", value=st.session_state.get("kanban_filter_due_to"), key="kanban_filter_due_to")
-            kanban_text = filter_col7.text_input("Szöveges szűrés", key="kanban_filter_text")
-            kanban_due_presence = filter_col8.selectbox(
+            kanban_due_from = filter_col7.date_input("Due - tól", value=st.session_state.get("kanban_filter_due_from"), key="kanban_filter_due_from")
+            kanban_due_to = filter_col8.date_input("Due - ig", value=st.session_state.get("kanban_filter_due_to"), key="kanban_filter_due_to")
+            extra_col1, extra_col2 = st.columns(2)
+            kanban_text = extra_col1.text_input("Szöveges szűrés", key="kanban_filter_text")
+            kanban_due_presence = extra_col2.selectbox(
                 "Van due?",
                 options=["all", "has", "missing"],
                 format_func=lambda value: {"all": "Mindegy", "has": "Van", "missing": "Nincs"}[value],
@@ -3638,12 +3811,14 @@ def app() -> None:
             )
 
         task_like = [record for record in records if record.status != "archived" and record.entity_type in {"task", "case", "project"}]
-        if kanban_project.strip():
-            needle = kanban_project.strip().lower()
-            task_like = [record for record in task_like if needle in record.project.lower()]
-        if kanban_org.strip():
-            needle = kanban_org.strip().lower()
-            task_like = [record for record in task_like if needle in record.organization.lower()]
+        if kanban_orgs:
+            task_like = [record for record in task_like if record.organization in kanban_orgs]
+        if kanban_teams:
+            task_like = [record for record in task_like if record.team in kanban_teams]
+        if kanban_projects:
+            task_like = [record for record in task_like if record.project in kanban_projects]
+        if kanban_cases:
+            task_like = [record for record in task_like if record.case_name in kanban_cases]
         if kanban_statuses:
             task_like = [record for record in task_like if record.status in kanban_statuses]
         if kanban_entities:
@@ -3742,7 +3917,7 @@ def app() -> None:
                         )
 
     with tab_timeline:
-        render_gantt_view(records, export_selection_path, source_dir, config, records_path, index_path, chroma_dir, history_events_path)
+        render_gantt_view(records, export_selection_path, source_dir, config, records_path, index_path, chroma_dir, history_events_path, existing_values)
 
     with tab_archive:
         st.subheader("Archívum")
@@ -4076,12 +4251,35 @@ def app() -> None:
                 )
                 active_only = filter_col3.checkbox("Csak aktivak", value=st.session_state.get("context_graph_active_only", False), key="context_graph_active_only")
 
-                filter_col4, filter_col5, filter_col6, filter_col7, filter_col8 = st.columns(5)
-                context_project = filter_col4.text_input("Projekt szures", key="context_graph_project")
-                context_case = filter_col5.text_input("Ugy szures", key="context_graph_case")
-                context_due_from = filter_col6.date_input("Due - tol", value=st.session_state.get("context_graph_due_from"), key="context_graph_due_from")
-                context_due_to = filter_col7.date_input("Due - ig", value=st.session_state.get("context_graph_due_to"), key="context_graph_due_to")
-                context_text = filter_col8.text_input("Kifejezés", key="context_graph_text")
+                filter_col4, filter_col5, filter_col6, filter_col7 = st.columns(4)
+                context_orgs = filter_col4.multiselect(
+                    "Munkahely / organization",
+                    options=existing_values["organization"],
+                    default=st.session_state.get("context_graph_orgs", []),
+                    key="context_graph_orgs",
+                )
+                context_teams = filter_col5.multiselect(
+                    "Team",
+                    options=existing_values["team"],
+                    default=st.session_state.get("context_graph_teams", []),
+                    key="context_graph_teams",
+                )
+                context_projects = filter_col6.multiselect(
+                    "Projekt",
+                    options=existing_values["project"],
+                    default=st.session_state.get("context_graph_projects", []),
+                    key="context_graph_projects",
+                )
+                context_cases = filter_col7.multiselect(
+                    "Ügy",
+                    options=existing_values["case_name"],
+                    default=st.session_state.get("context_graph_cases", []),
+                    key="context_graph_cases",
+                )
+                filter_col8, filter_col9, filter_col10 = st.columns(3)
+                context_due_from = filter_col8.date_input("Due - tol", value=st.session_state.get("context_graph_due_from"), key="context_graph_due_from")
+                context_due_to = filter_col9.date_input("Due - ig", value=st.session_state.get("context_graph_due_to"), key="context_graph_due_to")
+                context_text = filter_col10.text_input("Kifejezés", key="context_graph_text")
 
                 toggle_col1, toggle_col2 = st.columns(2)
                 show_relations = toggle_col1.checkbox("Relaciok mutatasa", value=st.session_state.get("context_graph_show_relations", True), key="context_graph_show_relations")
@@ -4097,8 +4295,10 @@ def app() -> None:
                 records,
                 filter_entities,
                 filter_statuses,
-                context_project,
-                context_case,
+                context_orgs,
+                context_teams,
+                context_projects,
+                context_cases,
                 context_text,
                 active_only,
                 context_due_from,
@@ -4205,6 +4405,7 @@ def app() -> None:
                                 st.info("Valassz ki egy rekordot a grafon.")
                             else:
                                 st.caption(f"Kijelolt rekord: {record_label(selected_record)}")
+                                render_record_links(selected_record, key_prefix=f"context_{selected_record.record_id}")
                                 if selected_record.entity_type == "task" and (selected_record.next_step or selected_record.next_step_estimate):
                                     meta_bits = []
                                     if selected_record.next_step:

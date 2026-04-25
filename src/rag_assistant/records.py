@@ -60,6 +60,8 @@ def normalize_records(records: list[KnowledgeRecord]) -> tuple[list[KnowledgeRec
         record.case_name = resolve_reference(record.case_name, "case")
         record.parent_id = (record.parent_id or "").strip()
         record.planning_bucket = (record.planning_bucket or "").strip()
+        record.web_links = [str(item).strip() for item in (record.web_links or []) if str(item).strip()]
+        record.obsidian_links = [str(item).strip() for item in (record.obsidian_links or []) if str(item).strip()]
         normalized_edges: list[dict] = []
         for item in record.graph_edges or []:
             if not isinstance(item, dict):

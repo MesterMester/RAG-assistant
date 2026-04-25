@@ -183,10 +183,10 @@
         line-height: 1.25;
         overflow-wrap: anywhere;
       }
-      .node-title-main.level-0 { font-size: 23px; }
-      .node-title-main.level-1 { font-size: 20px; }
-      .node-title-main.level-2 { font-size: 17px; }
-      .node-title-main.level-3 { font-size: 14px; }
+      .node-title-main.level-0 { font-size: 32px; }
+      .node-title-main.level-1 { font-size: 27px; }
+      .node-title-main.level-2 { font-size: 21px; }
+      .node-title-main.level-3 { font-size: 15px; }
       .node-extra {
         margin-top: 6px;
         font-size: 13px;
@@ -408,7 +408,7 @@
           const lineChars = Math.max(18, Math.floor((width - 32) / 7));
           const titleLines = Math.max(1, Math.ceil(label.length / lineChars));
           const extraLines = nextBits ? Math.max(1, Math.ceil(nextBits.length / Math.max(20, lineChars - 4))) : 0;
-          const metaLines = Math.max(1, Math.ceil(((node.entity_type ? 1 : 0) + (node.status ? 1 : 0) + (node.due_at ? 1 : 0) + (node.has_note ? 1 : 0)) / 3));
+          const metaLines = Math.max(1, Math.ceil(((node.entity_type ? 1 : 0) + (node.status ? 1 : 0) + (node.due_at ? 1 : 0) + (node.has_note ? 1 : 0) + (node.has_web_links ? 1 : 0) + (node.has_obsidian_links ? 1 : 0)) / 3));
           const height = 66 + (titleLines - 1) * 20 + extraLines * 18 + metaLines * 16;
           return { w: width, h: Math.max(92, height) };
         }
@@ -526,7 +526,7 @@
           const lineChars = Math.max(18, Math.floor((width - 32) / 7));
           const titleLines = Math.max(1, Math.ceil(label.length / lineChars));
           const extraLines = nextBits ? Math.max(1, Math.ceil(nextBits.length / Math.max(20, lineChars - 4))) : 0;
-          const metaLines = Math.max(1, Math.ceil(((node.entity_type ? 1 : 0) + (node.status ? 1 : 0) + (node.due_at ? 1 : 0) + (node.has_note ? 1 : 0)) / 3));
+          const metaLines = Math.max(1, Math.ceil(((node.entity_type ? 1 : 0) + (node.status ? 1 : 0) + (node.due_at ? 1 : 0) + (node.has_note ? 1 : 0) + (node.has_web_links ? 1 : 0) + (node.has_obsidian_links ? 1 : 0)) / 3));
           const height = 66 + (titleLines - 1) * 20 + extraLines * 18 + metaLines * 16;
           return { w: width, h: Math.max(92, height) };
         }
@@ -719,6 +719,8 @@
               node.status ? `<span class="chip">${escapeHtml(node.status)}</span>` : ``,
               node.due_at ? `<span class="chip">due ${escapeHtml(node.due_at)}</span>` : ``,
               node.has_note ? `<span class="chip">🗒️</span>` : ``,
+              node.has_web_links ? `<span class="chip">🔗</span>` : ``,
+              node.has_obsidian_links ? `<span class="chip">🪨</span>` : ``,
             ].filter(Boolean).join("");
             return `
               <div
@@ -728,7 +730,7 @@
                 style="left:${pos.x}px;top:${pos.y}px;width:${pos.w}px;min-height:${pos.h}px;--accent:${accent};--accent-soft:${soft};"
               >
                 <div class="node-title">
-                  <span class="node-title-main level-${Math.min(3, hierarchyLevel)}"><span class="shape ${shape}" style="--accent:${accent};margin-right:8px;"></span>${node.icon ? `<span style="margin-right:6px;">${escapeHtml(node.icon)}</span>` : ``}${node.has_note ? `<span style="margin-right:6px;">🗒️</span>` : ``}${escapeHtml(node.label)}</span>
+                  <span class="node-title-main level-${Math.min(3, hierarchyLevel)}"><span class="shape ${shape}" style="--accent:${accent};margin-right:8px;"></span>${node.icon ? `<span style="margin-right:6px;">${escapeHtml(node.icon)}</span>` : ``}${node.has_note ? `<span style="margin-right:6px;">🗒️</span>` : ``}${node.has_web_links ? `<span style="margin-right:6px;">🔗</span>` : ``}${node.has_obsidian_links ? `<span style="margin-right:6px;">🪨</span>` : ``}${escapeHtml(node.label)}</span>
                   <span style="display:flex;align-items:center;gap:6px;">
                     ${!node.synthetic ? `<button class="toggle-btn" type="button" data-toggle-export="${escapeHtml(node.id)}">${node.export_selected ? `◉` : `◎`}</button>` : ``}
                     ${childCount ? `<button class="toggle-btn" type="button" data-toggle-node="${escapeHtml(node.id)}">${isCollapsed ? `+` : `−`}</button>` : ``}

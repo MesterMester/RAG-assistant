@@ -56,6 +56,8 @@ class KnowledgeRecord:
     case_name: str = ""
     parent_id: str = ""
     related_people: list[str] = field(default_factory=list)
+    web_links: list[str] = field(default_factory=list)
+    obsidian_links: list[str] = field(default_factory=list)
     tags: list[str] = field(default_factory=list)
     relations: list[str] = field(default_factory=list)
     graph_edges: list[dict] = field(default_factory=list)
@@ -86,6 +88,8 @@ class KnowledgeRecord:
         payload.setdefault("relations", [])
         payload.setdefault("graph_edges", [])
         payload.setdefault("related_people", [])
+        payload.setdefault("web_links", [])
+        payload.setdefault("obsidian_links", [])
         payload.setdefault("summary", "")
         payload.setdefault("content", "")
         payload.setdefault("organization", "")
@@ -132,6 +136,8 @@ class KnowledgeRecord:
                 if isinstance(item, dict)
             ),
             " ".join(self.related_people),
+            " ".join(self.web_links),
+            " ".join(self.obsidian_links),
             " ".join(self.tags),
             " ".join(self.relations),
             " ".join(
@@ -158,6 +164,8 @@ class KnowledgeRecord:
             "status": self.status,
             "parent_id": self.parent_id,
             "people": ", ".join(self.related_people),
+            "web_links": ", ".join(self.web_links),
+            "obsidian_links": ", ".join(self.obsidian_links),
             "tags": ", ".join(self.tags),
             "decision_needed": self.decision_needed,
             "abbreviation": self.abbreviation,

@@ -1,0 +1,316 @@
+<!doctype html>
+<html lang="hu">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>Markdown Editor</title>
+    <style>
+      :root {
+        --bg: #ffffff;
+        --panel: #f8fafc;
+        --line: #dbe4ee;
+        --text: #0f172a;
+        --muted: #64748b;
+        --accent: #2563eb;
+      }
+      * { box-sizing: border-box; }
+      body {
+        margin: 0;
+        padding: 0;
+        font-family: Georgia, "Times New Roman", serif;
+        background: transparent;
+        color: var(--text);
+      }
+      #app {
+        width: 100%;
+      }
+      .shell {
+        display: grid;
+        grid-template-columns: 1fr;
+        gap: 10px;
+      }
+      .shell.preview {
+        grid-template-columns: minmax(0, 1.15fr) minmax(280px, 0.85fr);
+      }
+      .editor-wrap,
+      .preview-wrap {
+        border: 1px solid var(--line);
+        border-radius: 14px;
+        overflow: hidden;
+        background: var(--bg);
+      }
+      .preview-wrap {
+        background: var(--panel);
+      }
+      .label {
+        padding: 8px 12px;
+        border-bottom: 1px solid var(--line);
+        font-size: 12px;
+        color: var(--muted);
+        background: rgba(255,255,255,0.92);
+      }
+      textarea {
+        display: block;
+        width: 100%;
+        min-width: 0;
+        border: 0;
+        outline: none;
+        resize: vertical;
+        padding: 14px;
+        font-size: 14px;
+        line-height: 1.55;
+        font-family: "Iosevka", "JetBrains Mono", "Fira Code", monospace;
+        color: var(--text);
+        background: #fff;
+        tab-size: 2;
+      }
+      .preview {
+        padding: 14px;
+        overflow: auto;
+        font-size: 14px;
+        line-height: 1.6;
+      }
+      .preview h1, .preview h2, .preview h3 { margin: 0 0 10px; }
+      .preview p, .preview ul { margin: 0 0 10px; }
+      .preview ul { padding-left: 18px; }
+      .preview code {
+        background: rgba(148,163,184,0.14);
+        padding: 1px 5px;
+        border-radius: 6px;
+      }
+      .muted {
+        color: var(--muted);
+      }
+      @media (max-width: 980px) {
+        .shell.preview {
+          grid-template-columns: 1fr;
+        }
+      }
+    </style>
+  </head>
+  <body>
+    <div id="app"></div>
+    <script>
+      let lastValue = "";
+      let sendTimer = null;
+
+      function postMessageToStreamlit(type, data) {
+        window.parent.postMessage({ isStreamlitMessage: true, type, ...data }, "*");
+      }
+
+      function setFrameHeight() {
+        const height = Math.max(
+          document.documentElement.scrollHeight || 0,
+          document.body.scrollHeight || 0,
+          180
+        );
+        postMessageToStreamlit("streamlit:setFrameHeight", { height });
+      }
+
+      function sendValue(value) {
+        lastValue = value;
+        postMessageToStreamlit("streamlit:setComponentValue", {
+          value,
+          dataType: "json",
+        });
+      }
+
+      function escapeHtml(value) {
+        return String(value ?? "")
+          .replaceAll("&", "&amp;")
+          .replaceAll("<", "&lt;")
+          .replaceAll(">", "&gt;")
+          .replaceAll('"', "&quot;")
+          .replaceAll("'", "&#039;");
+      }
+
+      function renderPreviewMarkdown(text) {
+        const lines = String(text || "").split("\n");
+        const html = [];
+        let inList = false;
+        const closeList = () => {
+          if (inList) {
+            html.push("</ul>");
+            inList = false;
+          }
+        };
+
+        lines.forEach(rawLine => {
+          const line = rawLine.replace(/\t/g, "  ");
+          const trimmed = line.trim();
+          if (!trimmed) {
+            closeList();
+            return;
+          }
+          if (trimmed.startsWith("### ")) {
+            closeList();
+            html.push(`<h3>${escapeHtml(trimmed.slice(4))}</h3>`);
+            return;
+          }
+          if (trimmed.startsWith("## ")) {
+            closeList();
+            html.push(`<h2>${escapeHtml(trimmed.slice(3))}</h2>`);
+            return;
+          }
+          if (trimmed.startsWith("# ")) {
+            closeList();
+            html.push(`<h1>${escapeHtml(trimmed.slice(2))}</h1>`);
+            return;
+          }
+          const taskMatch = trimmed.match(/^[-*]\s+\[( |x|X)\]\s+(.*)$/);
+          if (taskMatch) {
+            if (!inList) {
+              html.push("<ul>");
+              inList = true;
+            }
+            const mark = taskMatch[1].toLowerCase() === "x" ? "☑" : "☐";
+            html.push(`<li>${mark} ${escapeHtml(taskMatch[2])}</li>`);
+            return;
+          }
+          const bulletMatch = trimmed.match(/^[-*]\s+(.*)$/);
+          if (bulletMatch) {
+            if (!inList) {
+              html.push("<ul>");
+              inList = true;
+            }
+            html.push(`<li>${escapeHtml(bulletMatch[1])}</li>`);
+            return;
+          }
+          closeList();
+          html.push(`<p>${escapeHtml(trimmed).replace(/`([^`]+)`/g, "<code>$1</code>")}</p>`);
+        });
+        closeList();
+        return html.join("") || `<p class="muted">Nincs előnézet.</p>`;
+      }
+
+      function continueListForLine(line) {
+        const indentMatch = line.match(/^(\s*)/);
+        const indent = indentMatch ? indentMatch[1] : "";
+        const taskMatch = line.match(/^(\s*)[-*]\s+\[( |x|X)\]\s+(.*)$/);
+        if (taskMatch) {
+          const tail = taskMatch[3].trim();
+          if (!tail) return "";
+          return `${taskMatch[1]}- [ ] `;
+        }
+        const bulletMatch = line.match(/^(\s*)[-*]\s+(.*)$/);
+        if (bulletMatch) {
+          const tail = bulletMatch[2].trim();
+          if (!tail) return "";
+          return `${bulletMatch[1]}- `;
+        }
+        return null;
+      }
+
+      function updateTextAreaHeight(textarea, desiredHeight) {
+        textarea.style.height = `${desiredHeight}px`;
+      }
+
+      function render(payload) {
+        const value = String(payload.value || "");
+        const label = String(payload.label || "Markdown");
+        const showPreview = Boolean(payload.show_preview);
+        const editorHeight = Number(payload.editor_height || 320);
+        const previewHeight = Number(payload.preview_height || editorHeight);
+        const app = document.getElementById("app");
+
+        app.innerHTML = `
+          <div class="shell ${showPreview ? "preview" : ""}">
+            <div class="editor-wrap">
+              <div class="label">${escapeHtml(label)}</div>
+              <textarea id="editor" spellcheck="true"></textarea>
+            </div>
+            ${showPreview ? `<div class="preview-wrap"><div class="label">Előnézet</div><div id="preview" class="preview"></div></div>` : ``}
+          </div>
+        `;
+
+        const textarea = document.getElementById("editor");
+        textarea.value = value;
+        updateTextAreaHeight(textarea, editorHeight);
+        const preview = document.getElementById("preview");
+        if (preview) {
+          preview.style.minHeight = `${previewHeight}px`;
+          preview.innerHTML = renderPreviewMarkdown(value);
+        }
+
+        textarea.addEventListener("input", () => {
+          const current = textarea.value;
+          if (preview) preview.innerHTML = renderPreviewMarkdown(current);
+          if (sendTimer) clearTimeout(sendTimer);
+          sendTimer = setTimeout(() => sendValue(current), 180);
+        });
+
+        textarea.addEventListener("blur", () => {
+          if (textarea.value !== lastValue) sendValue(textarea.value);
+        });
+
+        textarea.addEventListener("keydown", event => {
+          const start = textarea.selectionStart;
+          const end = textarea.selectionEnd;
+          const current = textarea.value;
+          const selected = current.slice(start, end);
+
+          if (event.key === "Tab") {
+            event.preventDefault();
+            const before = current.slice(0, start);
+            const after = current.slice(end);
+            const lineStart = before.lastIndexOf("\n") + 1;
+            const lineEnd = current.indexOf("\n", end) === -1 ? current.length : current.indexOf("\n", end);
+            const block = current.slice(lineStart, lineEnd);
+            if (selected.includes("\n") || start !== end) {
+              const lines = block.split("\n");
+              const nextLines = lines.map(line => {
+                if (event.shiftKey) {
+                  if (line.startsWith("\t")) return line.slice(1);
+                  if (line.startsWith("  ")) return line.slice(2);
+                  return line;
+                }
+                return `  ${line}`;
+              });
+              textarea.setRangeText(nextLines.join("\n"), lineStart, lineEnd, "end");
+            } else {
+              const insert = event.shiftKey ? "" : "  ";
+              if (event.shiftKey) {
+                const linePrefix = current.slice(lineStart, start);
+                if (linePrefix.endsWith("\t")) {
+                  textarea.setRangeText("", start - 1, start, "end");
+                } else if (linePrefix.endsWith("  ")) {
+                  textarea.setRangeText("", start - 2, start, "end");
+                }
+              } else {
+                textarea.setRangeText(insert, start, end, "end");
+              }
+            }
+            textarea.dispatchEvent(new Event("input", { bubbles: true }));
+            return;
+          }
+
+          if (event.key === "Enter") {
+            const before = current.slice(0, start);
+            const lineStart = before.lastIndexOf("\n") + 1;
+            const line = current.slice(lineStart, start);
+            const continuation = continueListForLine(line);
+            if (continuation !== null) {
+              event.preventDefault();
+              textarea.setRangeText(`\n${continuation}`, start, end, "end");
+              textarea.dispatchEvent(new Event("input", { bubbles: true }));
+              return;
+            }
+          }
+        });
+
+        setTimeout(setFrameHeight, 0);
+      }
+
+      window.addEventListener("message", event => {
+        const message = event.data;
+        if (!message || message.type !== "streamlit:render") return;
+        render(message.args.payload || {});
+      });
+
+      window.addEventListener("load", () => {
+        postMessageToStreamlit("streamlit:componentReady", { apiVersion: 1 });
+        setFrameHeight();
+      });
+    </script>
+  </body>
+</html>
