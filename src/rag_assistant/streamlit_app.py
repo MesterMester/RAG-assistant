@@ -503,28 +503,69 @@ def build_execution_sections(layout: dict) -> list[dict]:
         return {"key": key, "title": title, "meta": meta, "days": [serialize_day(day) for day in days], "week_key": week_key}
 
     def make_archive_group(key: str, title: str, days: list[dict], meta: str = "") -> dict:
-        alias_keys: list[str] = []
-        for day in days:
+        must_aliases: list[str] = []
+        prefer_aliases: list[str] = []
+        session_blocks: list[dict] = []
+        sorted_days = sorted(days, key=lambda item: item["date_obj"], reverse=True)
+        for day in sorted_days:
             for block in day.get("blocks", []):
+                lane = block.get("lane", "session")
                 block_key = block.get("key", "")
-                if block_key:
-                    alias_keys.append(block_key)
+                if not block_key:
+                    continue
+                if lane == "must":
+                    must_aliases.append(block_key)
+                elif lane == "prefer":
+                    prefer_aliases.append(block_key)
+                elif lane == "focus":
+                    continue
+                else:
+                    cloned_block = dict(block)
+                    original_title = str(block.get("title", "")).strip()
+                    base_title = re.sub(r"\s*\[[^\[\]]*\]\s*$", "", original_title).strip()
+                    day_label = day.get("title", "").strip()
+                    day_date = (day.get("date") or "").strip()
+                    if day_label and day_date:
+                        suffix = f"[{day_label}, {day_date}]"
+                    else:
+                        suffix = f"[{day_label or day_date}]" if (day_label or day_date) else ""
+                    cloned_block["title"] = f"{base_title} {suffix}".strip() if suffix else base_title
+                    cloned_block["alias_keys"] = [block_key]
+                    cloned_block["drop_target_key"] = block_key
+                    cloned_block["source_day_key"] = day.get("key", "")
+                    cloned_block["show_due_meta"] = True
+                    session_blocks.append(cloned_block)
         archive_day = {
             "key": f"{key}-archive",
             "title": title,
             "date": "",
             "blocks": [
                 {
-                    "key": f"{key}-archive-bucket",
-                    "title": title,
-                    "lane": "session",
-                    "alias_keys": alias_keys,
-                    "droppable": False,
-                    "sort": "date_desc",
+                    "key": f"{key}-archive-must",
+                    "title": "Mindenképp",
+                    "lane": "must",
+                    "alias_keys": must_aliases,
+                    "drop_target_key": must_aliases[0] if must_aliases else "",
                     "show_due_meta": True,
-                }
+                },
+                {
+                    "key": f"{key}-archive-prefer",
+                    "title": "Lehetőleg",
+                    "lane": "prefer",
+                    "alias_keys": prefer_aliases,
+                    "drop_target_key": prefer_aliases[0] if prefer_aliases else "",
+                    "show_due_meta": True,
+                },
+                *session_blocks,
             ],
         }
+        archive_day["blocks"] = [
+            block
+            for block in archive_day["blocks"]
+            if block.get("alias_keys")
+            or block.get("drop_target_key")
+            or block.get("lane") not in {"must", "prefer"}
+        ]
         return {"key": key, "title": title, "meta": meta, "days": [archive_day]}
 
     def make_week_group(week_start: date, days: list[dict], title: str = "", week_key: str = "") -> dict:
@@ -1166,6 +1207,34 @@ def render_record_links(record: KnowledgeRecord, key_prefix: str = "links") -> N
             st.markdown("**Obsidian**")
             for index, link in enumerate(obsidian_links):
                 st.markdown(f"- [{link}]({link})")
+
+
+@st.dialog("Markdown jegyzet", width="large")
+def render_markdown_editor_dialog(dialog_key: str, storage_key: str) -> None:
+    value = st.session_state.get(storage_key, "")
+    edited_value = markdown_editor(
+        {
+            "label": "Markdown jegyzet",
+            "value": value,
+            "show_preview": True,
+            "editor_height": 780,
+            "preview_height": 780,
+        },
+        key=f"{dialog_key}_fullscreen_editor",
+    )
+    st.session_state[storage_key] = str(edited_value or "")
+    action_col1, action_col2 = st.columns(2)
+    if action_col1.button("Kész", key=f"{dialog_key}_fullscreen_done"):
+        st.session_state[f"{dialog_key}_content_dialog_open"] = False
+        st.session_state.pop(f"{dialog_key}_content_dialog_snapshot", None)
+        st.rerun()
+    if action_col2.button("Bezár", key=f"{dialog_key}_fullscreen_close"):
+        snapshot = st.session_state.get(f"{dialog_key}_content_dialog_snapshot")
+        if snapshot is not None:
+            st.session_state[storage_key] = snapshot
+        st.session_state[f"{dialog_key}_content_dialog_open"] = False
+        st.session_state.pop(f"{dialog_key}_content_dialog_snapshot", None)
+        st.rerun()
 
 
 def render_side_detail_panel(
@@ -2198,21 +2267,35 @@ def render_record_editor(
     meta_col1, meta_col2 = st.columns(2)
     abbreviation = meta_col1.text_input("Rövidítés", value=record.abbreviation, key=f"{key_prefix}_abbreviation")
     icon = meta_col2.text_input("Ikon", value=record.icon, key=f"{key_prefix}_icon", placeholder="pl. 🟡")
+    content_storage_key = f"{key_prefix}_content_value"
+    if st.session_state.get(content_storage_key) != record.content and f"{key_prefix}_content_editor_initialized" not in st.session_state:
+        st.session_state[content_storage_key] = record.content
+    st.session_state[f"{key_prefix}_content_editor_initialized"] = True
     with st.expander("Jegyzet", expanded=False):
         note_toggle_col1, note_toggle_col2 = st.columns(2)
-        note_large = note_toggle_col1.toggle("Nagy nézet", value=st.session_state.get(f"{key_prefix}_content_large", False), key=f"{key_prefix}_content_large")
+        if note_toggle_col1.button("Teljes nézet", key=f"{key_prefix}_content_large_open"):
+            st.session_state[f"{key_prefix}_content_dialog_snapshot"] = st.session_state.get(content_storage_key, record.content)
+            st.session_state[f"{key_prefix}_content_dialog_open"] = True
         note_preview = note_toggle_col2.toggle("Markdown preview", value=st.session_state.get(f"{key_prefix}_content_preview", False), key=f"{key_prefix}_content_preview")
         content = markdown_editor(
             {
                 "label": "Markdown jegyzet",
-                "value": record.content,
-                "show_preview": note_preview,
-                "editor_height": 860 if note_large else 340,
-                "preview_height": 860 if note_large else 340,
+                "value": st.session_state.get(content_storage_key, record.content),
+                "show_preview": False,
+                "editor_height": 340,
+                "preview_height": 340,
             },
             key=f"{key_prefix}_content_editor",
         )
-        content = str(content or record.content or "")
+        content = str(content or st.session_state.get(content_storage_key, record.content) or "")
+        st.session_state[content_storage_key] = content
+        if note_preview:
+            st.caption("Előnézet")
+            preview_source = content.strip()
+            st.markdown(preview_source if preview_source else "_Nincs előnézet._")
+    if st.session_state.get(f"{key_prefix}_content_dialog_open", False):
+        render_markdown_editor_dialog(key_prefix, content_storage_key)
+        content = st.session_state.get(content_storage_key, content)
     with st.expander("Linkek", expanded=False):
         link_col1, link_col2 = st.columns(2)
         web_links_df = pd.DataFrame({"url": record.web_links or [""]})
