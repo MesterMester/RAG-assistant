@@ -238,6 +238,11 @@
         padding: 10px 12px;
         cursor: pointer;
       }
+      .task.selected {
+        outline: 2px solid #1d4ed8;
+        outline-offset: 2px;
+        background: #eff6ff;
+      }
       .task.dragging {
         opacity: 0.45;
       }
@@ -371,8 +376,10 @@
 
       let latestPayload = null;
       let dragRecordId = null;
+      let dragRecordIds = [];
       let dragBlockId = null;
       let suppressTaskClickUntil = 0;
+      let selectedTaskIds = new Set();
 
       function postMessageToStreamlit(type, data) {
         window.parent.postMessage({ isStreamlitMessage: true, type, ...data }, "*");
@@ -394,12 +401,13 @@
           .replaceAll("'", "&#039;");
       }
 
-      function sendMove(recordId, planningBucket) {
+      function sendMove(recordId, planningBucket, recordIds) {
         postMessageToStreamlit("streamlit:setComponentValue", {
           value: {
-            action: "move_task",
+            action: (recordIds && recordIds.length > 1) ? "move_tasks" : "move_task",
             event_id: `${Date.now()}-${Math.random().toString(16).slice(2)}`,
             record_id: recordId,
+            record_ids: recordIds || (recordId ? [recordId] : []),
             planning_bucket: planningBucket
           },
           dataType: "json",
@@ -488,9 +496,10 @@
             event.preventDefault();
             targetEl.classList.remove("drag-over");
             const recordId = dragRecordId || event.dataTransfer.getData("text/plain");
+            const recordIds = (dragRecordIds && dragRecordIds.length) ? dragRecordIds : (recordId ? [recordId] : []);
             const targetBucket = targetEl.dataset.bucketKey || "";
             if (recordId && targetBucket) {
-              sendMove(recordId, targetBucket);
+              sendMove(recordId, targetBucket, recordIds);
             }
           });
         });
@@ -867,18 +876,45 @@
           </div>
         `;
 
+        function syncSelectedTaskClasses() {
+          app.querySelectorAll(".task").forEach(taskEl => {
+            const recordId = taskEl.dataset.recordId || "";
+            taskEl.classList.toggle("selected", selectedTaskIds.has(recordId));
+          });
+        }
+
         app.querySelectorAll(".task").forEach(taskEl => {
           taskEl.addEventListener("click", event => {
             if (Date.now() < suppressTaskClickUntil) return;
             const button = event.target.closest(".mini-btn");
             if (button && !event.target.closest("[data-task-drag]")) return;
             const recordId = taskEl.dataset.recordId || "";
+            if (!recordId) return;
+            if (event.ctrlKey || event.metaKey) {
+              if (selectedTaskIds.has(recordId)) selectedTaskIds.delete(recordId);
+              else selectedTaskIds.add(recordId);
+              syncSelectedTaskClasses();
+              return;
+            }
+            selectedTaskIds.clear();
+            selectedTaskIds.add(recordId);
+            syncSelectedTaskClasses();
             if (recordId) {
               sendAction({ action: "select_record", record_id: recordId });
             }
           });
           taskEl.addEventListener("dragstart", event => {
             dragRecordId = taskEl.dataset.recordId;
+            if (dragRecordId && selectedTaskIds.has(dragRecordId) && selectedTaskIds.size > 1) {
+              dragRecordIds = Array.from(selectedTaskIds);
+            } else {
+              dragRecordIds = dragRecordId ? [dragRecordId] : [];
+              if (dragRecordId) {
+                selectedTaskIds.clear();
+                selectedTaskIds.add(dragRecordId);
+                syncSelectedTaskClasses();
+              }
+            }
             taskEl.classList.add("dragging");
             suppressTaskClickUntil = Date.now() + 250;
             event.dataTransfer.setData("text/plain", dragRecordId || "");
@@ -886,6 +922,7 @@
           });
           taskEl.addEventListener("dragend", () => {
             dragRecordId = null;
+            dragRecordIds = [];
             taskEl.classList.remove("dragging");
             suppressTaskClickUntil = Date.now() + 250;
             app.querySelectorAll(".drag-over").forEach(node => node.classList.remove("drag-over"));
@@ -895,6 +932,16 @@
           handleEl.addEventListener("dragstart", event => {
             const taskEl = handleEl.closest(".task");
             dragRecordId = handleEl.dataset.taskDrag || (taskEl ? taskEl.dataset.recordId : "");
+            if (dragRecordId && selectedTaskIds.has(dragRecordId) && selectedTaskIds.size > 1) {
+              dragRecordIds = Array.from(selectedTaskIds);
+            } else {
+              dragRecordIds = dragRecordId ? [dragRecordId] : [];
+              if (dragRecordId) {
+                selectedTaskIds.clear();
+                selectedTaskIds.add(dragRecordId);
+                syncSelectedTaskClasses();
+              }
+            }
             if (taskEl) taskEl.classList.add("dragging");
             suppressTaskClickUntil = Date.now() + 250;
             event.dataTransfer.setData("text/plain", dragRecordId || "");
@@ -903,6 +950,7 @@
           handleEl.addEventListener("dragend", () => {
             const taskEl = handleEl.closest(".task");
             dragRecordId = null;
+            dragRecordIds = [];
             if (taskEl) taskEl.classList.remove("dragging");
             suppressTaskClickUntil = Date.now() + 250;
             app.querySelectorAll(".drag-over").forEach(node => node.classList.remove("drag-over"));
@@ -961,7 +1009,15 @@
         attachTreeInteractions(app);
         attachScrollPersistence();
         restoreScrollPositions();
+        syncSelectedTaskClasses();
         scrollSelectedTaskIntoView(app, payload.selected_record_id || "");
+
+        window.onkeydown = event => {
+          if (event.key === "Escape") {
+            selectedTaskIds.clear();
+            syncSelectedTaskClasses();
+          }
+        };
 
         setTimeout(setFrameHeight, 0);
       }

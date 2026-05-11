@@ -14,7 +14,6 @@
       * { box-sizing: border-box; }
       body {
         margin: 0;
-        padding: 12px;
         height: 100vh;
         overflow: hidden;
         background:
@@ -25,10 +24,10 @@
         font-family: Georgia, "Times New Roman", serif;
       }
       #app {
-        height: calc(100vh - 24px);
+        height: 100vh;
         display: flex;
         flex-direction: column;
-        gap: 12px;
+        gap: 8px;
       }
       .note {
         display: flex;
@@ -36,6 +35,7 @@
         justify-content: space-between;
         gap: 12px;
         padding: 10px 14px;
+        margin: 12px 12px 0 12px;
         border: 1px solid var(--line);
         border-radius: 18px;
         background: rgba(255,255,255,0.92);
@@ -73,6 +73,7 @@
         min-height: 0;
         position: relative;
         overflow: hidden;
+        margin: 0 12px 12px 12px;
         border: 1px solid var(--line);
         border-radius: 24px;
         background: rgba(255,255,255,0.75);
@@ -253,7 +254,7 @@
           overflow: hidden;
         }
         #app {
-          height: calc(100vh - 24px);
+          height: 100vh;
         }
         .shell {
           min-height: 540px;
@@ -291,14 +292,22 @@
         synthetic: "#E2E8F0",
       };
 
+      let latestPayload = null;
+
+      function targetFrameHeight() {
+        const requested = Number(latestPayload && latestPayload.frame_height);
+        if (Number.isFinite(requested) && requested > 320) return requested;
+        const desktopHeight = Math.max(680, Math.min(window.innerHeight - 28, 1080));
+        const mobileHeight = Math.max(760, document.documentElement.scrollHeight || document.body.scrollHeight || 900);
+        return window.innerWidth <= 640 ? mobileHeight : desktopHeight;
+      }
+
       function postMessageToStreamlit(type, data) {
         window.parent.postMessage({ isStreamlitMessage: true, type, ...data }, "*");
       }
 
       function setFrameHeight() {
-        const desktopHeight = Math.max(680, Math.min(window.innerHeight - 28, 1080));
-        const mobileHeight = Math.max(760, document.documentElement.scrollHeight || document.body.scrollHeight || 900);
-        const height = window.innerWidth <= 640 ? mobileHeight : desktopHeight;
+        const height = targetFrameHeight();
         postMessageToStreamlit("streamlit:setFrameHeight", { height });
       }
 
@@ -688,6 +697,7 @@
       }
 
       function render(payload) {
+        latestPayload = payload || {};
         const app = document.getElementById("app");
         try {
           const collapsedState = readCollapsedState();
@@ -750,6 +760,7 @@
             return `<path class="${className}" d="${edgePath(source, target)}"></path>`;
           }).join("");
 
+          const frameHeight = targetFrameHeight();
           app.innerHTML = `
             <div class="note">
               <span>Kattints egy rekord-node-ra a jobb oldali szerkeszteshez. Zoom: Ctrl + egergorgeto. Fuggoleges gorgetes: sima gorgeto. Vizszintes gorgetes: Shift + gorgeto. Mozgatas: huzd az ures hatteret.</span>
@@ -773,6 +784,9 @@
               </div>
             </div>
           `;
+
+          document.body.style.height = `${frameHeight}px`;
+          document.getElementById("app").style.height = `${frameHeight}px`;
 
           const viewport = app.querySelector(".viewport");
           let dragRecordId = null;

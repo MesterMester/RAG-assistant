@@ -7,25 +7,28 @@
       html, body { height: 100%; }
       body { margin: 0; padding: 12px; font-family: Georgia, "Times New Roman", serif; background: linear-gradient(180deg,#fffefb,#f8fafc); overflow: hidden; }
       #app { height: calc(100vh - 24px); min-height: 0; }
-      .board-wrap { overflow: auto; padding-bottom: 8px; height: 100%; min-height: 0; }
-      .board { display: grid; grid-template-columns: repeat(7, minmax(180px, 1fr)) 160px; gap: 12px; min-width: 1520px; }
-      .col { border: 1px solid #e2e8f0; border-radius: 18px; background: rgba(255,255,255,0.88); min-height: 280px; height: calc(100vh - 56px); overflow: hidden; position: relative; display: flex; flex-direction: column; }
+      .board-wrap { overflow: auto; padding-bottom: 8px; height: 100%; min-height: 0; width: 100%; }
+      .board { display: grid; grid-auto-flow: column; grid-auto-columns: 240px; gap: 12px; width: max-content; min-width: 100%; }
+      .col { border: 1px solid #e2e8f0; border-radius: 18px; background: rgba(255,255,255,0.88); min-height: 280px; height: calc(100vh - 56px); overflow: hidden; position: relative; display: flex; flex-direction: column; min-width: 0; }
       .col.drag-over { border-color: #0f172a; background: #fff7ed; }
       .head { font-weight: 700; background: rgba(255,255,255,0.98); z-index: 8; padding: 10px 12px 8px 12px; border-bottom: 1px solid #e2e8f0; flex: 0 0 auto; }
       .col-body { padding: 10px; overflow-y: auto; overflow-x: hidden; min-height: 0; flex: 1 1 auto; }
-      .card { background: white; border-left: 4px solid #334155; border-radius: 14px; padding: 10px 12px; box-shadow: 0 4px 14px rgba(15,23,42,0.08); margin-bottom: 8px; cursor: grab; user-select: none; -webkit-user-drag: element; }
+      .card { background: white; border-left: 4px solid #334155; border-radius: 14px; padding: 10px 12px; box-shadow: 0 4px 14px rgba(15,23,42,0.08); margin-bottom: 8px; cursor: grab; user-select: none; -webkit-user-drag: element; width: 100%; min-width: 0; overflow: hidden; }
+      .card.selected { outline: 2px solid #1d4ed8; outline-offset: 2px; background: #eff6ff; }
       .card.dragging { opacity: 0.45; }
-      .meta { color: #64748b; font-size: 12px; margin-top: 2px; }
+      .meta { color: #64748b; font-size: 12px; margin-top: 2px; overflow-wrap: anywhere; }
       .empty { color: #94a3b8; font-size: 12px; border: 1px dashed #cbd5e1; border-radius: 12px; padding: 10px; }
       .mini-btn { border:1px solid #cbd5e1; background:#fff; border-radius:999px; padding:2px 8px; cursor:pointer; }
       .archive-col { border-style: dashed; background: rgba(248,250,252,0.95); }
-      @media (max-width: 1100px) { .board { grid-template-columns: repeat(2, minmax(180px, 1fr)); } }
+      @media (max-width: 1100px) { .board { grid-auto-columns: 220px; } }
     </style>
   </head>
   <body>
     <div id="app"></div>
     <script>
       let dragRecordId = null;
+      let dragRecordIds = [];
+      let selectedRecordIds = new Set();
       const scrollKey = "kanban_board_scroll_left";
       const scrollTopKey = "kanban_board_scroll_top";
       const columnScrollPrefix = "kanban_col_scroll_";
@@ -83,6 +86,12 @@
           });
         });
       }
+      function syncSelectedCards(app) {
+        app.querySelectorAll(".card").forEach(card => {
+          const recordId = card.dataset.recordId || "";
+          card.classList.toggle("selected", selectedRecordIds.has(recordId));
+        });
+      }
       window.addEventListener("message", event => {
         const message = event.data;
         if (!message || message.type !== "streamlit:render") return;
@@ -113,6 +122,16 @@
             const button = e.target && typeof e.target.closest === "function" ? e.target.closest("[data-toggle-export]") : null;
             if (button) return;
             const recordId = card.dataset.recordId || "";
+            if (!recordId) return;
+            if (e.ctrlKey || e.metaKey) {
+              if (selectedRecordIds.has(recordId)) selectedRecordIds.delete(recordId);
+              else selectedRecordIds.add(recordId);
+              syncSelectedCards(app);
+              return;
+            }
+            selectedRecordIds.clear();
+            selectedRecordIds.add(recordId);
+            syncSelectedCards(app);
             if (recordId) {
               persistScroll();
               sendAction({ action: "select_record", record_id: recordId });
@@ -124,11 +143,21 @@
               return;
             }
             dragRecordId = card.dataset.recordId;
+            if (dragRecordId && selectedRecordIds.has(dragRecordId) && selectedRecordIds.size > 1) {
+              dragRecordIds = Array.from(selectedRecordIds);
+            } else {
+              dragRecordIds = dragRecordId ? [dragRecordId] : [];
+              if (dragRecordId) {
+                selectedRecordIds.clear();
+                selectedRecordIds.add(dragRecordId);
+                syncSelectedCards(app);
+              }
+            }
             card.classList.add("dragging");
             e.dataTransfer.effectAllowed = "move";
             e.dataTransfer.setData("text/plain", dragRecordId || "");
           });
-          card.addEventListener("dragend", () => { dragRecordId = null; card.classList.remove("dragging"); app.querySelectorAll(".col").forEach(col => col.classList.remove("drag-over")); });
+          card.addEventListener("dragend", () => { dragRecordId = null; dragRecordIds = []; card.classList.remove("dragging"); app.querySelectorAll(".col").forEach(col => col.classList.remove("drag-over")); });
           card.addEventListener("dragover", e => {
             e.preventDefault();
             markColumn(closestColumn(card));
@@ -139,9 +168,10 @@
             if (!col) return;
             markColumn(null);
             const recordId = dragRecordId || e.dataTransfer.getData("text/plain");
+            const recordIds = (dragRecordIds && dragRecordIds.length) ? dragRecordIds : (recordId ? [recordId] : []);
             const status = col.dataset.status || "";
             if (recordId && status) {
-              sendAction({ action: "move_status", record_id: recordId, status });
+              sendAction({ action: recordIds.length > 1 ? "move_status_many" : "move_status", record_id: recordId, record_ids: recordIds, status });
             }
           });
         });
@@ -169,13 +199,15 @@
             e.preventDefault();
             markColumn(null);
             const recordId = dragRecordId || e.dataTransfer.getData("text/plain");
+            const recordIds = (dragRecordIds && dragRecordIds.length) ? dragRecordIds : (recordId ? [recordId] : []);
             const status = col.dataset.status || "";
             if (recordId && status) {
               persistScroll();
-              sendAction({ action: "move_status", record_id: recordId, status });
+              sendAction({ action: recordIds.length > 1 ? "move_status_many" : "move_status", record_id: recordId, record_ids: recordIds, status });
             }
           });
         });
+        syncSelectedCards(app);
         restoreScroll();
         const selectedRecordId = payload.selected_record_id || "";
         if (selectedRecordId) {
@@ -203,6 +235,13 @@
       });
       window.addEventListener("load", () => { post("streamlit:componentReady", { apiVersion: 1 }); setHeight(); });
       window.addEventListener("resize", () => setHeight());
+      window.addEventListener("keydown", event => {
+        if (event.key === "Escape") {
+          selectedRecordIds.clear();
+          const app = document.getElementById("app");
+          if (app) syncSelectedCards(app);
+        }
+      });
     </script>
   </body>
 </html>

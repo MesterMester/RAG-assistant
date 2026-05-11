@@ -3072,7 +3072,7 @@ def render_execution_graph(
         valid_task_ids = [record.record_id for record in filtered_task_records]
 
         drag_result = execution_dnd_board(component_payload, key="execution_dnd_surface")
-        if isinstance(drag_result, dict) and drag_result.get("action") in {"move_task", "add_block", "remove_block", "rename_day", "rename_week", "toggle_export", "toggle_export_many", "move_block", "select_record"}:
+        if isinstance(drag_result, dict) and drag_result.get("action") in {"move_task", "move_tasks", "add_block", "remove_block", "rename_day", "rename_week", "toggle_export", "toggle_export_many", "move_block", "select_record"}:
             event_id = str(drag_result.get("event_id", "")).strip()
             if event_id and st.session_state.get("last_execution_drag_event") == event_id:
                 drag_result = None
@@ -3119,6 +3119,27 @@ def render_execution_graph(
                     history_path,
                     "Task áthelyezve.",
                 )
+        if isinstance(drag_result, dict) and drag_result.get("action") == "move_tasks":
+            record_ids = [str(item).strip() for item in drag_result.get("record_ids", []) if str(item).strip()]
+            planning_bucket = str(drag_result.get("planning_bucket", "")).strip()
+            normalized_bucket = "" if planning_bucket == "__unscheduled__" else planning_bucket
+            target_ids = set(record_ids)
+            dragged_records = [record for record in task_records if record.record_id in target_ids]
+            if dragged_records and any(normalized_bucket != record.planning_bucket for record in dragged_records):
+                bucket_info = day_for_bucket(layout, normalized_bucket) if normalized_bucket else None
+                next_due = date.today().isoformat() if normalized_bucket == "main_focus" else (bucket_info.get("day_date") if bucket_info else None)
+                updated_records = [
+                    update_record(
+                        record,
+                        planning_bucket=normalized_bucket,
+                        due_at=next_due,
+                        focus_rank=None,
+                    )
+                    if record.record_id in target_ids
+                    else record
+                    for record in records
+                ]
+                persist_records_bulk_fast(updated_records, records_path, history_path, f"{len(target_ids)} task áthelyezve.")
         if isinstance(drag_result, dict) and drag_result.get("action") == "add_block":
             day_key = str(drag_result.get("day_key", "")).strip()
             title = str(drag_result.get("title", "")).strip()
@@ -3951,7 +3972,7 @@ def app() -> None:
                     ],
                 }
                 kanban_result = kanban_dnd_board(kanban_payload, key="kanban_dnd_surface")
-                if isinstance(kanban_result, dict) and kanban_result.get("action") in {"toggle_export", "move_status", "select_record"}:
+                if isinstance(kanban_result, dict) and kanban_result.get("action") in {"toggle_export", "move_status", "move_status_many", "select_record"}:
                     event_id = str(kanban_result.get("event_id", "")).strip()
                     if event_id and st.session_state.get("last_kanban_drag_event") == event_id:
                         kanban_result = None
@@ -3973,6 +3994,19 @@ def app() -> None:
                             history_events_path,
                             "Státusz frissítve.",
                         )
+                if isinstance(kanban_result, dict) and kanban_result.get("action") == "move_status_many":
+                    record_ids = [str(item).strip() for item in kanban_result.get("record_ids", []) if str(item).strip()]
+                    new_status = str(kanban_result.get("status", "")).strip()
+                    target_ids = set(record_ids)
+                    moved_records = [record for record in task_like if record.record_id in target_ids]
+                    if moved_records and new_status and any(record.status != new_status for record in moved_records):
+                        updated_records = [
+                            update_record(record, status=new_status)
+                            if record.record_id in target_ids
+                            else record
+                            for record in records
+                        ]
+                        persist_records_bulk_fast(updated_records, records_path, history_events_path, f"{len(target_ids)} elem státusza frissítve.")
                 if isinstance(kanban_result, dict) and kanban_result.get("action") == "select_record":
                     record_id = str(kanban_result.get("record_id", "")).strip()
                     if record_id and record_id in {record.record_id for record in records}:
@@ -4430,6 +4464,7 @@ def app() -> None:
                             st.session_state.get("context_graph_force_fit_token", ""),
                             export_selected_ids,
                         )
+                        graph_payload["frame_height"] = panel_height
                         graph_result = context_graph(graph_payload, key="context_graph_surface")
                         if isinstance(graph_result, dict) and graph_result.get("action") in {"select_node", "reparent_node", "toggle_export", "toggle_detail_panel"}:
                             event_id = str(graph_result.get("event_id", "")).strip()
