@@ -4225,37 +4225,107 @@ def app() -> None:
                 if folder_rules:
                     included_text = "\n".join(f"- `{path}`" for path in folder_rules.included_paths) or "- *(minden megengedett)*"
                     excluded_text = "\n".join(f"- `{path}`" for path in folder_rules.excluded_paths) or "- *(nincs külön tiltás)*"
-                    st.markdown(f"**Included paths**\n{included_text}")
-                    st.markdown(f"**Excluded paths**\n{excluded_text}")
+                    with st.expander("Included paths", expanded=False):
+                        st.markdown(included_text)
+                    with st.expander("Excluded paths", expanded=False):
+                        st.markdown(excluded_text)
                 st.caption(
                     "A `profile_root` lehet maga a Thunderbird profilkönyvtár is, amelyben a `global-messages-db.sqlite`, `ImapMail` vagy `Mail` mappák vannak. Megadhatsz közvetlen `ImapMail` vagy `Mail` útvonalat is."
                 )
                 action_col1, action_col2 = st.columns(2)
                 if action_col1.button("Mailboxok felderítése", key="tb_discover_mailboxes"):
                     inventory, inventory_errors = discover_mailboxes(tb_config, folder_rules)
-                    st.session_state["tb_inventory_rows"] = [item.to_dict() for item in inventory]
+                    st.session_state["tb_inventory_rows"] = [{**item.to_dict(), "selected": True} for item in inventory]
                     st.session_state["tb_inventory_errors"] = inventory_errors
                     st.session_state["tb_preview_rows"] = []
                     st.session_state["tb_preview_items"] = []
-                    st.rerun()
-                if action_col2.button("Preview frissítése", key="tb_preview_mailboxes"):
-                    inventory_rows = st.session_state.get("tb_inventory_rows", [])
-                    if not inventory_rows:
-                        inventory, inventory_errors = discover_mailboxes(tb_config, folder_rules)
-                        inventory_rows = [item.to_dict() for item in inventory]
-                        st.session_state["tb_inventory_rows"] = inventory_rows
-                        st.session_state["tb_inventory_errors"] = inventory_errors
-                    inventory_objects = [ThunderbirdMailboxInventory(**row) for row in inventory_rows]
-                    previews, preview_errors = preview_messages(inventory_objects, tb_config.since_days, tb_config.max_messages_per_mailbox)
-                    st.session_state["tb_preview_items"] = [item.to_dict() for item in previews]
-                    st.session_state["tb_preview_rows"] = thunderbird_preview_rows(previews)
-                    st.session_state["tb_preview_errors"] = preview_errors
                     st.rerun()
 
                 inventory_rows = st.session_state.get("tb_inventory_rows", [])
                 if inventory_rows:
                     st.markdown("**Talált mailboxok**")
-                    st.dataframe(pd.DataFrame(inventory_rows), use_container_width=True, hide_index=True)
+                    edited_inventory_df = st.data_editor(
+                        pd.DataFrame(inventory_rows),
+                        use_container_width=True,
+                        hide_index=True,
+                        key="tb_inventory_editor",
+                        disabled=["path", "size_bytes", "account_hint"],
+                        column_config={
+                            "selected": st.column_config.CheckboxColumn("preview"),
+                            "path": st.column_config.TextColumn("mailbox path"),
+                            "size_bytes": st.column_config.NumberColumn("méret (byte)", format="%d"),
+                            "account_hint": st.column_config.TextColumn("fiók"),
+                        },
+                    )
+                    edited_inventory_rows = edited_inventory_df.to_dict("records")
+                    st.session_state["tb_inventory_rows"] = edited_inventory_rows
+                    quick_col1, quick_col2 = st.columns(2)
+                    if quick_col1.button("Összes mailbox kijelölése", key="tb_select_all_mailboxes"):
+                        st.session_state["tb_inventory_rows"] = [{**row, "selected": True} for row in edited_inventory_rows]
+                        st.rerun()
+                    if quick_col2.button("Összes mailbox kijelölés törlése", key="tb_deselect_all_mailboxes"):
+                        st.session_state["tb_inventory_rows"] = [{**row, "selected": False} for row in edited_inventory_rows]
+                        st.rerun()
+                    selected_count = sum(1 for row in edited_inventory_rows if bool(row.get("selected")))
+                    st.caption(f"Kijelölve preview-re: {selected_count} mailbox")
+                    preview_setting_col1, preview_setting_col2, preview_setting_col3 = st.columns(3)
+                    preview_limit_per_mailbox = preview_setting_col1.number_input(
+                        "Max levél / mailbox",
+                        min_value=1,
+                        max_value=1000,
+                        value=int(st.session_state.get("tb_preview_limit_per_mailbox", tb_config.max_messages_per_mailbox)),
+                        key="tb_preview_limit_per_mailbox",
+                    )
+                    preview_date_mode = preview_setting_col2.selectbox(
+                        "Dátum szűrés",
+                        options=["none", "last_days", "from_date"],
+                        format_func=lambda value: {
+                            "none": "Nincs dátum szűrés",
+                            "last_days": "X napra visszamenőleg",
+                            "from_date": "Megadott dátumtól",
+                        }[value],
+                        index=["none", "last_days", "from_date"].index(st.session_state.get("tb_preview_date_mode", "last_days")),
+                        key="tb_preview_date_mode",
+                    )
+                    preview_since_days = None
+                    preview_since_date = None
+                    if preview_date_mode == "last_days":
+                        preview_since_days = preview_setting_col3.number_input(
+                            "Elmúlt napok",
+                            min_value=1,
+                            max_value=3650,
+                            value=int(st.session_state.get("tb_preview_since_days", tb_config.since_days)),
+                            key="tb_preview_since_days",
+                        )
+                    elif preview_date_mode == "from_date":
+                        preview_since_date = preview_setting_col3.date_input(
+                            "Megadott dátumtól",
+                            value=st.session_state.get("tb_preview_since_date"),
+                            key="tb_preview_since_date",
+                        )
+                    if action_col2.button("Preview frissítése", key="tb_preview_mailboxes"):
+                        selected_inventory_rows = [row for row in edited_inventory_rows if bool(row.get("selected"))]
+                        if not selected_inventory_rows:
+                            st.info("Jelölj ki legalább egy mailboxot a preview-hez.")
+                        else:
+                            inventory_objects = [
+                                ThunderbirdMailboxInventory(
+                                    path=str(row.get("path", "")),
+                                    size_bytes=int(row.get("size_bytes", 0) or 0),
+                                    account_hint=str(row.get("account_hint", "")),
+                                )
+                                for row in selected_inventory_rows
+                            ]
+                            previews, preview_errors = preview_messages(
+                                inventory_objects,
+                                int(preview_since_days) if preview_since_days is not None else None,
+                                int(preview_limit_per_mailbox),
+                                preview_since_date,
+                            )
+                            st.session_state["tb_preview_items"] = [item.to_dict() for item in previews]
+                            st.session_state["tb_preview_rows"] = thunderbird_preview_rows(previews)
+                            st.session_state["tb_preview_errors"] = preview_errors
+                            st.rerun()
                 for error in st.session_state.get("tb_inventory_errors", []):
                     st.warning(error)
 

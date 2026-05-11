@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 from dataclasses import asdict, dataclass
-from datetime import datetime, timedelta, timezone
+from datetime import date, datetime, timedelta, timezone
 from email.message import Message
 from email.utils import parsedate_to_datetime
 import hashlib
@@ -326,10 +326,19 @@ def _preview_id(mailbox_path: Path, message: Message, sent_at: str) -> str:
     return hashlib.sha1(fingerprint.encode("utf-8")).hexdigest()[:16]
 
 
-def preview_messages(inventory: list[ThunderbirdMailboxInventory], since_days: int, max_messages_per_mailbox: int) -> tuple[list[ThunderbirdMessagePreview], list[str]]:
+def preview_messages(
+    inventory: list[ThunderbirdMailboxInventory],
+    since_days: int | None,
+    max_messages_per_mailbox: int,
+    since_date: date | None = None,
+) -> tuple[list[ThunderbirdMessagePreview], list[str]]:
     previews: list[ThunderbirdMessagePreview] = []
     errors: list[str] = []
-    min_dt = datetime.now(timezone.utc) - timedelta(days=max(0, since_days))
+    min_dt: datetime | None = None
+    if since_date is not None:
+        min_dt = datetime.combine(since_date, datetime.min.time(), tzinfo=timezone.utc)
+    elif since_days is not None:
+        min_dt = datetime.now(timezone.utc) - timedelta(days=max(0, since_days))
 
     for mailbox_item in inventory:
         mailbox_path = Path(mailbox_item.path)
@@ -343,7 +352,7 @@ def preview_messages(inventory: list[ThunderbirdMailboxInventory], since_days: i
         try:
             for message in mbox:
                 sent_dt = _message_datetime(message)
-                if sent_dt and sent_dt < min_dt:
+                if min_dt is not None and sent_dt and sent_dt < min_dt:
                     continue
                 body = extract_text_body(message)
                 body_preview = re.sub(r"\s+", " ", body).strip()[:240]

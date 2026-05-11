@@ -196,3 +196,247 @@ Később opcionális:
    - case
 6. `message_id` biztos megjelenítése.
 7. Később `Open in Thunderbird` helper akció.
+
+## Konkrét végrehajtási sorrend
+
+Az alábbi sorrend arra van optimalizálva, hogy minél hamarabb legyen használható triage-felület, és csak utána jöjjön az intelligensebb besorolás.
+
+### Phase 2A - Mailbox inventory -> olvasható preview
+
+Ez az első valóban használható mérföldkő.
+
+Mit csinálunk:
+
+1. A Thunderbird tabon a mailbox inventory jelenjen meg kiválasztható listaként.
+2. A `TH_folders.md` alapján csak az `Included Paths`-ban szereplő, és nem kizárt mailboxok jelenjenek meg.
+3. A preview ne az összes mailboxból fusson, hanem csak a kijelölt mailboxokból.
+4. Legyen állítható:
+   - `since_days`
+   - `max_messages_per_mailbox`
+   - opcionálisan egy teljes preview limit is
+
+Technikai feladatok:
+
+- `thunderbird_importer.py`
+  - mailbox kiválasztás támogatása
+  - preview futtatása csak a kiválasztott mailboxokra
+- `streamlit_app.py`
+  - inventory táblázat checkboxokkal
+  - `Preview frissítése` gomb a kiválasztott mailboxokra
+
+Elfogadási feltétel:
+
+- a 3 fiók releváns mailboxai külön kijelölhetők
+- a preview csak abból a körből készül
+- a lista gyorsan, áttekinthetően használható
+
+### Phase 2B - Email metaadatok kibővítése
+
+Ez kell ahhoz, hogy valódi triage legyen.
+
+Beolvasandó mezők:
+
+- `message_id`
+- `subject`
+- `from`
+- `to`
+- `cc`
+- `date`
+- `thunderbird_tags`
+- `mailbox_path`
+- `account`
+- `in_reply_to`
+- `references`
+- `has_attachment`
+- `body_preview`
+
+Fontos megjegyzés:
+
+- a teljes email body még ekkor sem cél
+- csak rövid preview kell
+
+Technikai feladatok:
+
+- `thunderbird_importer.py`
+  - preview modell bővítése
+  - header-ekből metaadatok kinyerése
+  - Thunderbird tagek olvasásának bekötése
+- `streamlit_app.py`
+  - preview tábla oszlopainak bővítése
+
+Elfogadási feltétel:
+
+- minden preview sorból látszik, ki írta, kinek, mikor, melyik mailboxból, milyen tagekkel
+
+### Phase 2C - Szűrhető triage tábla
+
+Ettől válik napi használatra alkalmas felületté.
+
+Szűrők:
+
+- mailbox
+- account
+- date range
+- tags
+- from
+- to / cc
+- subject text
+- attachment yes/no
+
+Később jöhet:
+
+- `reply state`
+- `waiting_on_me`
+- `waiting_on_them`
+
+Technikai feladatok:
+
+- `streamlit_app.py`
+  - Thunderbird szűrőpanel
+  - táblázat újraszűrése a preview adatokon
+
+Elfogadási feltétel:
+
+- a felhasználó gyorsan leszűkítheti a napi fontos levelek körét
+
+### Phase 2D - Triage mezők
+
+Ettől lesz döntési felület, nem csak olvasó.
+
+Soronkénti mezők:
+
+- `importance_level` (`1..5`)
+- `suggested_scope_type`
+- `suggested_scope_value`
+- `suggested_action`
+- `notes`
+
+Javasolt `suggested_action` értékek:
+
+- `context_only`
+- `review`
+- `todo`
+- `urgent_followup`
+- `decision_needed`
+
+Technikai feladatok:
+
+- preview sorokhoz lokális UI-state
+- később menthető triage-state
+
+Elfogadási feltétel:
+
+- minden emailhez megadható, mennyire fontos és hova tartozik
+
+### Phase 2E - Ember és scope felismerés
+
+Ez az a rész, ami már elkezdi összekötni az emailt a rendszer többi adatával.
+
+Feladat:
+
+- email címek összekötése `person` rekordokkal
+- `person` rekordokból scope-javaslat:
+  - organization
+  - team
+  - project
+  - case
+- subject és mailbox alapján plusz javaslatok
+
+MVP szint:
+
+- egyszerű heurisztika
+- nem AI, csak szabály + meglévő rekord-egyezés
+
+Később:
+
+- embedding / fuzzy matching
+- AI-assisted routing
+
+Elfogadási feltétel:
+
+- a rendszer tudjon legalább kezdeti javaslatot tenni arra, hogy egy levél melyik ügyhöz / projekthez / teamhez tartozik
+
+### Phase 2F - "Ki vár kire?" logika
+
+Ez a legfontosabb operatív intelligencia.
+
+Szükséges bemenet:
+
+- saját email-címek listája
+- `from`, `to`, `cc`
+- `date`
+- `message_id`
+- `in_reply_to`
+- `references`
+
+Első szabályok:
+
+- ha az utolsó releváns levél tőlem ment és nincs rá válasz: `waiting_on_them`
+- ha az utolsó releváns levél bejött és nincs rá outbound válasz: `waiting_on_me`
+- ha nagyon friss inbound és magas importance: feljebb kell sorolni
+
+Kimeneti mezők:
+
+- `reply_state`
+- `attention_reason`
+
+Elfogadási feltétel:
+
+- a preview listában látszódjon, hol várnak a válaszomra, és hol várok én
+
+### Phase 2G - Batch import a RAG-ba
+
+Csak akkor jöjjön, ha a preview és a triage már jó.
+
+Import modell:
+
+- nem külön emailenként `source_item`
+- hanem scope szerinti csoportos email-node
+
+Példák:
+
+- `Emailek / SP / KT / 2026-19. hét`
+- `Emailek / XY ügy / nyitott válaszok`
+
+A csoportos node tartalma:
+
+- soronként az emailek metaadatai
+- importance
+- tags
+- `message_id`
+- mailbox/account
+- rövid preview
+
+Az `1` és `2` szintű emailek:
+
+- igen, menjenek be
+- de lightweight kontextusként
+
+Az `3-5` szintű emailek:
+
+- operatív figyelmet kapnak
+- később task/event/decision javaslat is épülhet rájuk
+
+## Mi a legjobb legközelebbi sprint?
+
+Ha egyetlen rövid sprintre kell lebontani, akkor ez a legjobb:
+
+1. Phase 2A
+   Mailbox-választás a preview előtt.
+2. Phase 2B
+   Metaadatok bővítése: `cc`, `tags`, `message_id`, `in_reply_to`, `references`, `has_attachment`.
+3. Phase 2C
+   Szűrőpanel a Thunderbird tabon.
+4. Phase 2D
+   Soronkénti `importance 1..5`.
+
+Ez már adna egy napi használható Thunderbird triage felületet.
+
+## Mi nem cél még most
+
+- teljes body-import minden emailhez
+- teljes thread-rekonstrukció minden edge case-re
+- közvetlen Thunderbird deep link kész megoldás
+- AI-alapú automatikus routing első körben
+
+Ezek jöhetnek később, de nem kellenek az első valóban hasznos MVP-hez.
