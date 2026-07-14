@@ -65,8 +65,13 @@ class ThunderbirdMessagePreview:
     subject: str
     sender: str
     recipients: str
+    cc: str
     sent_at: str
     message_id: str
+    thunderbird_tags: str
+    has_attachment: bool
+    in_reply_to: str
+    references: str
     body_preview: str
     body_full: str
     selected: bool = True
@@ -314,6 +319,42 @@ def extract_text_body(message: Message) -> str:
     return _decode_payload(payload, message.get_content_charset()).strip()
 
 
+def extract_thunderbird_tags(message: Message) -> list[str]:
+    raw_values: list[str] = []
+    for header_name in ["keywords", "x-mozilla-keys", "x-tag", "x-tags"]:
+        raw = message.get(header_name, "").strip()
+        if raw:
+            raw_values.append(raw)
+    tags: list[str] = []
+    seen: set[str] = set()
+    ignored = {"nonjunk", "junk", "$label1", "$label2", "$label3", "$label4", "$label5"}
+    for raw in raw_values:
+        for bit in re.split(r"[,\s]+", raw):
+            clean = bit.strip()
+            if not clean:
+                continue
+            lowered = clean.lower()
+            if lowered in ignored:
+                continue
+            if clean in seen:
+                continue
+            seen.add(clean)
+            tags.append(clean)
+    return tags
+
+
+def has_attachment(message: Message) -> bool:
+    if not message.is_multipart():
+        disposition = (message.get("Content-Disposition") or "").lower()
+        return "attachment" in disposition
+    for part in message.walk():
+        disposition = (part.get("Content-Disposition") or "").lower()
+        filename = (part.get_filename() or "").strip()
+        if "attachment" in disposition or filename:
+            return True
+    return False
+
+
 def _preview_id(mailbox_path: Path, message: Message, sent_at: str) -> str:
     fingerprint = "|".join(
         [
@@ -365,8 +406,13 @@ def preview_messages(
                         subject=message.get("subject", "").strip() or "(tárgy nélkül)",
                         sender=message.get("from", "").strip(),
                         recipients=message.get("to", "").strip(),
+                        cc=message.get("cc", "").strip(),
                         sent_at=(sent_dt.isoformat() if sent_dt else ""),
                         message_id=message.get("message-id", "").strip(),
+                        thunderbird_tags=", ".join(extract_thunderbird_tags(message)),
+                        has_attachment=has_attachment(message),
+                        in_reply_to=message.get("in-reply-to", "").strip(),
+                        references=message.get("references", "").strip(),
                         body_preview=body_preview,
                         body_full=body,
                     )
@@ -387,13 +433,18 @@ def thunderbird_preview_rows(previews: list[ThunderbirdMessagePreview]) -> list[
         {
             "selected": item.selected,
             "preview_id": item.preview_id,
-            "subject": item.subject,
             "from": item.sender,
             "to": item.recipients,
+            "subject": item.subject,
+            "thunderbird_tags": item.thunderbird_tags,
+            "cc": item.cc,
             "sent_at": item.sent_at,
             "mailbox": item.mailbox_name,
             "account": item.account_hint,
             "message_id": item.message_id,
+            "has_attachment": item.has_attachment,
+            "in_reply_to": item.in_reply_to,
+            "references": item.references,
             "body_preview": item.body_preview,
         }
         for item in previews
