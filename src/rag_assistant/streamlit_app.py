@@ -159,6 +159,7 @@ def thunderbird_preview_to_record(preview: ThunderbirdMessagePreview) -> Knowled
         f"date: {preview.sent_at}" if preview.sent_at else "",
         f"message-id: {preview.message_id}" if preview.message_id else "",
         f"thunderbird-tags: {preview.thunderbird_tags}" if preview.thunderbird_tags else "",
+        f"thunderbird-tag-headers: {preview.thunderbird_tag_headers}" if preview.thunderbird_tag_headers else "",
         f"has-attachment: {'yes' if preview.has_attachment else 'no'}",
         f"in-reply-to: {preview.in_reply_to}" if preview.in_reply_to else "",
         f"references: {preview.references}" if preview.references else "",
@@ -176,6 +177,84 @@ def thunderbird_preview_to_record(preview: ThunderbirdMessagePreview) -> Knowled
         status="inbox",
         tags=["email", "thunderbird"],
     )
+
+
+def thunderbird_preview_from_dict(payload: dict) -> ThunderbirdMessagePreview:
+    defaults = {field: "" for field in ThunderbirdMessagePreview.__dataclass_fields__}
+    defaults.update({"has_attachment": False, "selected": True})
+    defaults.update(payload)
+    return ThunderbirdMessagePreview(**defaults)
+
+
+def suggest_thunderbird_triage(row: dict, existing_values: dict[str, list[str]], planning_titles: dict[str, str]) -> dict:
+    haystack = " ".join(
+        str(row.get(field, ""))
+        for field in ["from", "to", "cc", "subject", "thunderbird_tags", "mailbox", "body_preview"]
+    ).lower()
+
+    def first_match(values: list[str]) -> str:
+        for value in values:
+            clean = str(value).strip()
+            if clean and clean.lower() in haystack:
+                return clean
+        return ""
+
+    org = first_match(existing_values.get("organization", []))
+    team = first_match(existing_values.get("team", []))
+    project = first_match(existing_values.get("project", []))
+    case_name = first_match(existing_values.get("case_name", []))
+    scope_bits = [bit for bit in [org, team, project, case_name] if bit]
+    subject = str(row.get("subject", "")).strip()
+    tags = str(row.get("thunderbird_tags", "")).lower()
+    urgent_words = ["urgent", "fontos", "sürgős", "surgos", "deadline", "határidő", "hatarido"]
+    todo_words = ["todo", "task", "feladat", "válasz", "valasz", "reply", "kérlek", "kerlek"]
+
+    if any(word in haystack for word in urgent_words):
+        suggested_bucket = "main_focus"
+    else:
+        suggested_bucket = ""
+    if not suggested_bucket:
+        for bucket_key, title in planning_titles.items():
+            title_lower = title.lower()
+            if title_lower and any(bit.lower() in title_lower for bit in scope_bits):
+                suggested_bucket = bucket_key
+                break
+
+    action = "context_only"
+    if any(word in haystack for word in urgent_words):
+        action = "urgent_followup"
+    elif any(word in haystack for word in todo_words) or tags:
+        action = "review"
+    next_step = "Átnézni és eldönteni a következő lépést"
+    if action == "urgent_followup":
+        next_step = "Sürgős válasz vagy follow-up megírása"
+    elif "reply" in haystack or "válasz" in haystack or "valasz" in haystack:
+        next_step = "Válasz megírása"
+
+    scope = " / ".join(scope_bits)
+    return {
+        "suggested_scope": scope,
+        "suggested_context_change": f"Kapcsolás: {scope}" if scope else "Új context node / kézi besorolás",
+        "suggested_bucket": suggested_bucket,
+        "suggested_next_step": next_step if subject else "",
+        "suggested_action": action,
+    }
+
+
+def enrich_thunderbird_preview_rows(rows: list[dict], existing_values: dict[str, list[str]], planning_titles: dict[str, str]) -> list[dict]:
+    enriched: list[dict] = []
+    for row in rows:
+        next_row = dict(row)
+        suggestions = suggest_thunderbird_triage(next_row, existing_values, planning_titles)
+        for key, value in suggestions.items():
+            next_row.setdefault(key, value)
+            next_row.setdefault(f"original_{key}", value)
+        next_row["suggestion_modified"] = any(
+            str(next_row.get(key, "")) != str(next_row.get(f"original_{key}", ""))
+            for key in suggestions
+        )
+        enriched.append(next_row)
+    return enriched
 
 
 def record_label(record: KnowledgeRecord) -> str:
@@ -4237,8 +4316,7 @@ def app() -> None:
                 st.caption(
                     "A `profile_root` lehet maga a Thunderbird profilkönyvtár is, amelyben a `global-messages-db.sqlite`, `ImapMail` vagy `Mail` mappák vannak. Megadhatsz közvetlen `ImapMail` vagy `Mail` útvonalat is."
                 )
-                action_col1, action_col2 = st.columns(2)
-                if action_col1.button("Mailboxok felderítése", key="tb_discover_mailboxes"):
+                if st.button("Mailboxok felderítése", key="tb_discover_mailboxes"):
                     inventory, inventory_errors = discover_mailboxes(tb_config, folder_rules)
                     st.session_state["tb_inventory_rows"] = [{**item.to_dict(), "selected": True} for item in inventory]
                     st.session_state["tb_inventory_errors"] = inventory_errors
@@ -4248,6 +4326,8 @@ def app() -> None:
 
                 inventory_rows = st.session_state.get("tb_inventory_rows", [])
                 if inventory_rows:
+                    inventory_rows = [{**row, "selected": bool(row.get("selected", True))} for row in inventory_rows]
+                    st.session_state["tb_inventory_rows"] = inventory_rows
                     st.markdown("**Talált mailboxok**")
                     edited_inventory_df = st.data_editor(
                         pd.DataFrame(inventory_rows),
@@ -4308,47 +4388,192 @@ def app() -> None:
                             value=st.session_state.get("tb_preview_since_date"),
                             key="tb_preview_since_date",
                         )
-                    if action_col2.button("Preview frissítése", key="tb_preview_mailboxes"):
+                    if st.button("Preview frissítése kijelölt mailboxokból", key="tb_preview_mailboxes"):
                         selected_inventory_rows = [row for row in edited_inventory_rows if bool(row.get("selected"))]
                         if not selected_inventory_rows:
                             st.info("Jelölj ki legalább egy mailboxot a preview-hez.")
                         else:
-                            inventory_objects = [
-                                ThunderbirdMailboxInventory(
-                                    path=str(row.get("path", "")),
-                                    size_bytes=int(row.get("size_bytes", 0) or 0),
-                                    account_hint=str(row.get("account_hint", "")),
+                            with st.spinner("Thunderbird preview olvasása..."):
+                                inventory_objects = [
+                                    ThunderbirdMailboxInventory(
+                                        path=str(row.get("path", "")),
+                                        size_bytes=int(row.get("size_bytes", 0) or 0),
+                                        account_hint=str(row.get("account_hint", "")),
+                                    )
+                                    for row in selected_inventory_rows
+                                ]
+                                previews, preview_errors = preview_messages(
+                                    inventory_objects,
+                                    int(preview_since_days) if preview_since_days is not None else None,
+                                    int(preview_limit_per_mailbox),
+                                    preview_since_date,
                                 )
-                                for row in selected_inventory_rows
-                            ]
-                            previews, preview_errors = preview_messages(
-                                inventory_objects,
-                                int(preview_since_days) if preview_since_days is not None else None,
-                                int(preview_limit_per_mailbox),
-                                preview_since_date,
-                            )
                             st.session_state["tb_preview_items"] = [item.to_dict() for item in previews]
-                            st.session_state["tb_preview_rows"] = thunderbird_preview_rows(previews)
+                            st.session_state["tb_preview_rows"] = enrich_thunderbird_preview_rows(
+                                thunderbird_preview_rows(previews),
+                                existing_values,
+                                planning_titles,
+                            )
                             st.session_state["tb_preview_errors"] = preview_errors
+                            st.session_state["tb_preview_last_summary"] = f"{len(previews)} levél előkészítve {len(selected_inventory_rows)} mailboxból."
                             st.rerun()
                 for error in st.session_state.get("tb_inventory_errors", []):
                     st.warning(error)
+                if st.session_state.get("tb_preview_last_summary"):
+                    st.success(st.session_state["tb_preview_last_summary"])
 
                 preview_rows = st.session_state.get("tb_preview_rows", [])
                 if preview_rows:
                     st.markdown("**Előkészített levelek**")
+                    preview_rows = enrich_thunderbird_preview_rows(preview_rows, existing_values, planning_titles)
+                    st.session_state["tb_preview_rows"] = preview_rows
+                    preview_df = pd.DataFrame(preview_rows)
+                    with st.expander("Preview szűrés és rendezés", expanded=True):
+                        filter_col1, filter_col2, filter_col3, filter_col4 = st.columns(4)
+                        tb_filter_text = filter_col1.text_input("Kifejezés", key="tb_preview_filter_text")
+                        tb_filter_tag = filter_col2.text_input("Thunderbird tag", key="tb_preview_filter_tag")
+                        tb_filter_account = filter_col3.multiselect(
+                            "Fiók",
+                            options=sorted(preview_df["account"].dropna().astype(str).unique().tolist()) if "account" in preview_df else [],
+                            default=st.session_state.get("tb_preview_filter_account", []),
+                            key="tb_preview_filter_account",
+                        )
+                        tb_filter_mailbox = filter_col4.multiselect(
+                            "Mailbox",
+                            options=sorted(preview_df["mailbox"].dropna().astype(str).unique().tolist()) if "mailbox" in preview_df else [],
+                            default=st.session_state.get("tb_preview_filter_mailbox", []),
+                            key="tb_preview_filter_mailbox",
+                        )
+                        filter_col5, filter_col6, filter_col7, filter_col8 = st.columns(4)
+                        tb_filter_from = filter_col5.text_input("Feladó", key="tb_preview_filter_from")
+                        tb_filter_to = filter_col6.text_input("Címzett / cc", key="tb_preview_filter_to")
+                        tb_filter_attachment = filter_col7.selectbox(
+                            "Csatolmány",
+                            options=["all", "has", "missing"],
+                            format_func=lambda value: {"all": "Mindegy", "has": "Van", "missing": "Nincs"}[value],
+                            key="tb_preview_filter_attachment",
+                        )
+                        tb_filter_modified = filter_col8.selectbox(
+                            "Javaslat módosítva",
+                            options=["all", "modified", "original"],
+                            format_func=lambda value: {"all": "Mindegy", "modified": "Módosított", "original": "Eredeti"}[value],
+                            key="tb_preview_filter_modified",
+                        )
+                        sort_columns = [column for column in ["sent_at", "from", "to", "subject", "thunderbird_tags", "account", "mailbox", "suggested_scope", "suggested_bucket", "suggested_action"] if column in preview_df.columns]
+                        sort_col1, sort_col2, sort_col3 = st.columns(3)
+                        tb_sort_1 = sort_col1.selectbox("Rendezés 1", options=[""] + sort_columns, key="tb_preview_sort_1")
+                        tb_sort_2 = sort_col2.selectbox("Rendezés 2", options=[""] + sort_columns, key="tb_preview_sort_2")
+                        tb_sort_direction = sort_col3.selectbox("Irány", options=["desc", "asc"], format_func=lambda value: {"desc": "Csökkenő", "asc": "Növekvő"}[value], key="tb_preview_sort_direction")
+
+                    filtered_preview_df = preview_df.copy()
+                    if tb_filter_text.strip():
+                        needle = tb_filter_text.strip().lower()
+                        searchable_columns = ["from", "to", "cc", "subject", "thunderbird_tags", "body_preview", "suggested_scope", "suggested_context_change", "suggested_next_step"]
+                        filtered_preview_df = filtered_preview_df[
+                            filtered_preview_df.apply(
+                                lambda row: any(needle in str(row.get(column, "")).lower() for column in searchable_columns),
+                                axis=1,
+                            )
+                        ]
+                    if tb_filter_tag.strip() and "thunderbird_tags" in filtered_preview_df:
+                        needle = tb_filter_tag.strip().lower()
+                        filtered_preview_df = filtered_preview_df[filtered_preview_df["thunderbird_tags"].astype(str).str.lower().str.contains(needle, na=False)]
+                    if tb_filter_account and "account" in filtered_preview_df:
+                        filtered_preview_df = filtered_preview_df[filtered_preview_df["account"].astype(str).isin(tb_filter_account)]
+                    if tb_filter_mailbox and "mailbox" in filtered_preview_df:
+                        filtered_preview_df = filtered_preview_df[filtered_preview_df["mailbox"].astype(str).isin(tb_filter_mailbox)]
+                    if tb_filter_from.strip() and "from" in filtered_preview_df:
+                        filtered_preview_df = filtered_preview_df[filtered_preview_df["from"].astype(str).str.lower().str.contains(tb_filter_from.strip().lower(), na=False)]
+                    if tb_filter_to.strip():
+                        needle = tb_filter_to.strip().lower()
+                        filtered_preview_df = filtered_preview_df[
+                            filtered_preview_df.apply(lambda row: needle in str(row.get("to", "")).lower() or needle in str(row.get("cc", "")).lower(), axis=1)
+                        ]
+                    if tb_filter_attachment == "has" and "has_attachment" in filtered_preview_df:
+                        filtered_preview_df = filtered_preview_df[filtered_preview_df["has_attachment"].astype(bool)]
+                    elif tb_filter_attachment == "missing" and "has_attachment" in filtered_preview_df:
+                        filtered_preview_df = filtered_preview_df[~filtered_preview_df["has_attachment"].astype(bool)]
+                    if tb_filter_modified == "modified" and "suggestion_modified" in filtered_preview_df:
+                        filtered_preview_df = filtered_preview_df[filtered_preview_df["suggestion_modified"].astype(bool)]
+                    elif tb_filter_modified == "original" and "suggestion_modified" in filtered_preview_df:
+                        filtered_preview_df = filtered_preview_df[~filtered_preview_df["suggestion_modified"].astype(bool)]
+
+                    sort_by = [column for column in [tb_sort_1, tb_sort_2] if column]
+                    if sort_by:
+                        filtered_preview_df = filtered_preview_df.sort_values(by=sort_by, ascending=(tb_sort_direction == "asc"), kind="stable")
+
+                    all_preview_columns = [
+                        "selected",
+                        "from",
+                        "to",
+                        "subject",
+                        "thunderbird_tags",
+                        "suggested_scope",
+                        "suggested_context_change",
+                        "suggested_bucket",
+                        "suggested_next_step",
+                        "suggested_action",
+                        "suggestion_modified",
+                        "cc",
+                        "sent_at",
+                        "mailbox",
+                        "account",
+                        "message_id",
+                        "has_attachment",
+                        "in_reply_to",
+                        "references",
+                        "body_preview",
+                        "thunderbird_tag_headers",
+                    ]
+                    default_visible_columns = [column for column in all_preview_columns if column in filtered_preview_df.columns and not column.startswith("original_")]
+                    visible_columns = st.multiselect(
+                        "Látható oszlopok",
+                        options=default_visible_columns,
+                        default=[
+                            column
+                            for column in st.session_state.get("tb_preview_visible_columns", default_visible_columns)
+                            if column in default_visible_columns
+                        ],
+                        key="tb_preview_visible_columns",
+                    )
+                    table_columns = ["preview_id"] + [column for column in visible_columns if column != "preview_id"]
+                    visible_ids = set(filtered_preview_df["preview_id"].astype(str).tolist()) if "preview_id" in filtered_preview_df else set()
+                    bulk_col1, bulk_col2 = st.columns(2)
+                    if bulk_col1.button("Láthatók kijelölése upsertre", key="tb_preview_select_visible"):
+                        st.session_state["tb_preview_rows"] = [
+                            {**row, "selected": True} if str(row.get("preview_id", "")) in visible_ids else row
+                            for row in st.session_state.get("tb_preview_rows", [])
+                        ]
+                        st.rerun()
+                    if bulk_col2.button("Láthatók kijelölésének törlése", key="tb_preview_deselect_visible"):
+                        st.session_state["tb_preview_rows"] = [
+                            {**row, "selected": False} if str(row.get("preview_id", "")) in visible_ids else row
+                            for row in st.session_state.get("tb_preview_rows", [])
+                        ]
+                        st.rerun()
+
+                    st.caption(f"Látható levelek: {len(filtered_preview_df)} / {len(preview_df)}")
                     edited_preview_df = st.data_editor(
-                        pd.DataFrame(preview_rows),
+                        filtered_preview_df,
                         use_container_width=True,
                         hide_index=True,
                         key="tb_preview_editor",
-                        disabled=["preview_id", "from", "to", "subject", "thunderbird_tags", "cc", "sent_at", "mailbox", "account", "message_id", "has_attachment", "in_reply_to", "references", "body_preview"],
+                        column_order=[column for column in table_columns if column in filtered_preview_df.columns],
+                        disabled=["preview_id", "from", "to", "subject", "thunderbird_tags", "cc", "sent_at", "mailbox", "account", "message_id", "has_attachment", "in_reply_to", "references", "body_preview", "thunderbird_tag_headers", "suggestion_modified"],
                         column_config={
                             "selected": st.column_config.CheckboxColumn("upsert"),
+                            "preview_id": st.column_config.TextColumn("id", width="small"),
                             "from": st.column_config.TextColumn("feladó"),
                             "to": st.column_config.TextColumn("címzett"),
                             "subject": st.column_config.TextColumn("tárgy"),
                             "thunderbird_tags": st.column_config.TextColumn("thunderbird_tag"),
+                            "thunderbird_tag_headers": st.column_config.TextColumn("tag header debug"),
+                            "suggested_scope": st.column_config.TextColumn("javasolt hely"),
+                            "suggested_context_change": st.column_config.TextColumn("context graph javaslat"),
+                            "suggested_bucket": st.column_config.TextColumn("javasolt bucket"),
+                            "suggested_next_step": st.column_config.TextColumn("javasolt next step"),
+                            "suggested_action": st.column_config.SelectboxColumn("javasolt akció", options=["context_only", "review", "todo", "urgent_followup", "decision_needed"]),
+                            "suggestion_modified": st.column_config.CheckboxColumn("módosítva"),
                             "cc": st.column_config.TextColumn("cc"),
                             "sent_at": st.column_config.TextColumn("dátum"),
                             "mailbox": st.column_config.TextColumn("mailbox"),
@@ -4360,15 +4585,37 @@ def app() -> None:
                             "body_preview": st.column_config.TextColumn("előnézet"),
                         },
                     )
+                    edited_rows_by_id = {
+                        str(row.get("preview_id", "")): row
+                        for row in edited_preview_df.to_dict("records")
+                    }
+                    next_preview_rows = []
+                    suggestion_keys = ["suggested_scope", "suggested_context_change", "suggested_bucket", "suggested_next_step", "suggested_action"]
+                    for row in st.session_state.get("tb_preview_rows", []):
+                        preview_id = str(row.get("preview_id", ""))
+                        if preview_id in edited_rows_by_id:
+                            merged = {**row, **edited_rows_by_id[preview_id]}
+                            merged["suggestion_modified"] = any(
+                                str(merged.get(key, "")) != str(merged.get(f"original_{key}", ""))
+                                for key in suggestion_keys
+                            )
+                            next_preview_rows.append(merged)
+                        else:
+                            next_preview_rows.append(row)
+                    st.session_state["tb_preview_rows"] = next_preview_rows
                     st.caption("Amíg itt csak preview-zol és nem nyomsz Upsertet, semmi nem kerül be a RAG-ba.")
                     if st.button("Upsert a RAG-ba", key="tb_upsert_to_rag"):
-                        rows = edited_preview_df.to_dict("records")
+                        rows = st.session_state.get("tb_preview_rows", [])
                         preview_item_lookup = {
                             str(item.get("preview_id", "")): item
                             for item in st.session_state.get("tb_preview_items", [])
                         }
+                        preview_row_lookup = {
+                            str(row.get("preview_id", "")): row
+                            for row in rows
+                        }
                         selected_previews = [
-                            ThunderbirdMessagePreview(**preview_item_lookup[str(row.get("preview_id", ""))])
+                            thunderbird_preview_from_dict(preview_item_lookup[str(row.get("preview_id", ""))])
                             for row in rows
                             if bool(row.get("selected")) and str(row.get("preview_id", "")) in preview_item_lookup
                         ]
@@ -4378,6 +4625,23 @@ def app() -> None:
                             record_lookup = {record.record_id: record for record in records}
                             for preview in selected_previews:
                                 mapped_record = thunderbird_preview_to_record(preview)
+                                triage_row = preview_row_lookup.get(preview.preview_id, {})
+                                triage_lines = [
+                                    "",
+                                    "triage:",
+                                    f"  suggested_scope: {triage_row.get('suggested_scope', '')}",
+                                    f"  suggested_context_change: {triage_row.get('suggested_context_change', '')}",
+                                    f"  suggested_bucket: {triage_row.get('suggested_bucket', '')}",
+                                    f"  suggested_next_step: {triage_row.get('suggested_next_step', '')}",
+                                    f"  suggested_action: {triage_row.get('suggested_action', '')}",
+                                    f"  suggestion_modified: {bool(triage_row.get('suggestion_modified'))}",
+                                ]
+                                mapped_record = update_record(
+                                    mapped_record,
+                                    content=f"{mapped_record.content}\n" + "\n".join(triage_lines),
+                                    planning_bucket=str(triage_row.get("suggested_bucket", "")).strip(),
+                                    next_step=str(triage_row.get("suggested_next_step", "")).strip(),
+                                )
                                 record_lookup[mapped_record.record_id] = mapped_record
                             persist_records_bulk(
                                 list(record_lookup.values()),

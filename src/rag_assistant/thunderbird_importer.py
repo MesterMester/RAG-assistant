@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from dataclasses import asdict, dataclass
 from datetime import date, datetime, timedelta, timezone
+from email.header import decode_header, make_header
 from email.message import Message
 from email.utils import parsedate_to_datetime
 import hashlib
@@ -69,6 +70,7 @@ class ThunderbirdMessagePreview:
     sent_at: str
     message_id: str
     thunderbird_tags: str
+    thunderbird_tag_headers: str
     has_attachment: bool
     in_reply_to: str
     references: str
@@ -302,6 +304,19 @@ def _decode_payload(payload: bytes | str | None, charset: str | None) -> str:
     return payload.decode("utf-8", errors="replace")
 
 
+def decode_header_value(value: str | None) -> str:
+    if not value:
+        return ""
+    try:
+        return str(make_header(decode_header(value))).strip()
+    except Exception:
+        return str(value).strip()
+
+
+def decoded_message_header(message: Message, name: str) -> str:
+    return decode_header_value(message.get(name, ""))
+
+
 def extract_text_body(message: Message) -> str:
     if message.is_multipart():
         parts: list[str] = []
@@ -321,13 +336,13 @@ def extract_text_body(message: Message) -> str:
 
 def extract_thunderbird_tags(message: Message) -> list[str]:
     raw_values: list[str] = []
-    for header_name in ["keywords", "x-mozilla-keys", "x-tag", "x-tags"]:
+    for header_name in ["keywords", "x-keywords", "x-mozilla-keys", "x-mozilla-label", "x-label", "x-tag", "x-tags"]:
         raw = message.get(header_name, "").strip()
         if raw:
-            raw_values.append(raw)
+            raw_values.append(decode_header_value(raw))
     tags: list[str] = []
     seen: set[str] = set()
-    ignored = {"nonjunk", "junk", "$label1", "$label2", "$label3", "$label4", "$label5"}
+    ignored = {"nonjunk", "junk"}
     for raw in raw_values:
         for bit in re.split(r"[,\s]+", raw):
             clean = bit.strip()
@@ -341,6 +356,15 @@ def extract_thunderbird_tags(message: Message) -> list[str]:
             seen.add(clean)
             tags.append(clean)
     return tags
+
+
+def thunderbird_tag_header_debug(message: Message) -> str:
+    parts: list[str] = []
+    for header_name in ["keywords", "x-keywords", "x-mozilla-keys", "x-mozilla-label", "x-label", "x-tag", "x-tags"]:
+        raw = message.get(header_name, "").strip()
+        if raw:
+            parts.append(f"{header_name}: {decode_header_value(raw)}")
+    return " | ".join(parts)
 
 
 def has_attachment(message: Message) -> bool:
@@ -403,16 +427,17 @@ def preview_messages(
                         mailbox_path=str(mailbox_path),
                         mailbox_name=mailbox_path.name,
                         account_hint=mailbox_item.account_hint,
-                        subject=message.get("subject", "").strip() or "(tárgy nélkül)",
-                        sender=message.get("from", "").strip(),
-                        recipients=message.get("to", "").strip(),
-                        cc=message.get("cc", "").strip(),
+                        subject=decoded_message_header(message, "subject") or "(tárgy nélkül)",
+                        sender=decoded_message_header(message, "from"),
+                        recipients=decoded_message_header(message, "to"),
+                        cc=decoded_message_header(message, "cc"),
                         sent_at=(sent_dt.isoformat() if sent_dt else ""),
-                        message_id=message.get("message-id", "").strip(),
+                        message_id=decoded_message_header(message, "message-id"),
                         thunderbird_tags=", ".join(extract_thunderbird_tags(message)),
+                        thunderbird_tag_headers=thunderbird_tag_header_debug(message),
                         has_attachment=has_attachment(message),
-                        in_reply_to=message.get("in-reply-to", "").strip(),
-                        references=message.get("references", "").strip(),
+                        in_reply_to=decoded_message_header(message, "in-reply-to"),
+                        references=decoded_message_header(message, "references"),
                         body_preview=body_preview,
                         body_full=body,
                     )
@@ -437,6 +462,7 @@ def thunderbird_preview_rows(previews: list[ThunderbirdMessagePreview]) -> list[
             "to": item.recipients,
             "subject": item.subject,
             "thunderbird_tags": item.thunderbird_tags,
+            "thunderbird_tag_headers": item.thunderbird_tag_headers,
             "cc": item.cc,
             "sent_at": item.sent_at,
             "mailbox": item.mailbox_name,
