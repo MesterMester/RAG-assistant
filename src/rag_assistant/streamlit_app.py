@@ -47,9 +47,12 @@ from rag_assistant.thunderbird_importer import (
     ThunderbirdMailboxInventory,
     ThunderbirdMessagePreview,
     discover_mailboxes,
+    load_global_messages_tag_index,
     load_thunderbird_folder_rules,
     load_thunderbird_import_config,
+    load_thunderbird_tag_map,
     preview_messages,
+    scan_thunderbird_tag_sources,
     thunderbird_preview_rows,
 )
 from rag_assistant.vector_store import VectorStoreError, upsert_manual_records
@@ -127,6 +130,31 @@ def set_export_selection(path: Path, record_ids: list[str]) -> list[str]:
     return load_export_selection(path)
 
 
+def load_ui_settings(path: Path) -> dict:
+    if not path.exists():
+        return {}
+    try:
+        payload = json.loads(path.read_text(encoding="utf-8"))
+    except (json.JSONDecodeError, OSError):
+        return {}
+    return payload if isinstance(payload, dict) else {}
+
+
+def save_ui_settings(path: Path, settings: dict) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(json.dumps(settings, ensure_ascii=False, indent=2), encoding="utf-8")
+
+
+def update_ui_settings(path: Path, section: str, values: dict) -> None:
+    settings = load_ui_settings(path)
+    current = settings.get(section, {})
+    if not isinstance(current, dict):
+        current = {}
+    current.update(values)
+    settings[section] = current
+    save_ui_settings(path, settings)
+
+
 def export_filename_suggestion(records: list[KnowledgeRecord]) -> str:
     # Default filename format: RAG-exp_YYMMDD-HH:MM:SS.md (editable by user)
     now = datetime.now()
@@ -147,6 +175,44 @@ def thunderbird_record_id(preview: ThunderbirdMessagePreview) -> str:
     digest = re.sub(r"[^a-z0-9]+", "-", stable_source.lower()).strip("-")[:48]
     digest = digest or "mail"
     return f"tb-mail-{digest}"
+
+
+def render_thunderbird_preview_markdown(rows: list[dict]) -> str:
+    lines = ["# Thunderbird preview export", ""]
+    for row in rows:
+        subject = str(row.get("subject", "") or "(tárgy nélkül)").strip()
+        lines.append(f"- {subject}")
+        email_link = str(row.get("email_mid_link", "") or "").strip()
+        if email_link:
+            lines.append(f"  - 📩 {email_link}")
+        details = [
+            ("from", row.get("from", "")),
+            ("to", row.get("to", "")),
+            ("cc", row.get("cc", "")),
+            ("sent_at", row.get("sent_at", "")),
+            ("tags", row.get("thunderbird_tags", "")),
+            ("mailbox", row.get("mailbox", "")),
+            ("account", row.get("account", "")),
+            ("message_id", row.get("message_id", "")),
+            ("suggested_scope", row.get("suggested_scope", "")),
+            ("suggested_bucket", row.get("suggested_bucket", "")),
+            ("suggested_next_step", row.get("suggested_next_step", "")),
+            ("suggested_action", row.get("suggested_action", "")),
+        ]
+        detail_text = " | ".join(f"{key}: {value}" for key, value in details if str(value or "").strip())
+        if detail_text:
+            lines.append(f"  - ℹ️ | {detail_text}")
+        context_change = str(row.get("suggested_context_change", "") or "").strip()
+        if context_change:
+            lines.append(f"  - context: {context_change}")
+        body_preview = str(row.get("body_preview", "") or "").strip()
+        if body_preview:
+            lines.append(f"  - preview: {body_preview}")
+        debug = str(row.get("thunderbird_tag_headers", "") or "").strip()
+        if debug:
+            lines.append(f"  - tag_debug: {debug}")
+        lines.append("")
+    return "\n".join(lines).strip() + "\n"
 
 
 def thunderbird_preview_to_record(preview: ThunderbirdMessagePreview) -> KnowledgeRecord:
@@ -349,6 +415,7 @@ def record_from_editor_values(existing: KnowledgeRecord, edit_values: dict) -> K
             next_steps=edit_values["next_steps"],
             planning_bucket=edit_values["planning_bucket"],
             focus_rank=edit_values["focus_rank"],
+            attention_level=edit_values["attention_level"],
         )
     )
 
@@ -383,6 +450,7 @@ def editor_values_dirty(existing: KnowledgeRecord, edit_values: dict) -> bool:
         "next_steps": edit_values["next_steps"],
         "planning_bucket": edit_values["planning_bucket"],
         "focus_rank": edit_values["focus_rank"],
+        "attention_level": edit_values["attention_level"],
     }
     baseline = {
         "title": existing.title.strip(),
@@ -413,6 +481,7 @@ def editor_values_dirty(existing: KnowledgeRecord, edit_values: dict) -> bool:
         "next_steps": existing.next_steps,
         "planning_bucket": existing.planning_bucket,
         "focus_rank": existing.focus_rank,
+        "attention_level": existing.attention_level,
     }
     return compare != baseline
 
@@ -1910,6 +1979,11 @@ def record_from_table_row(row: dict, existing: KnowledgeRecord) -> KnowledgeReco
     event_at = normalize_table_value(row.get("event_at")) or None
     focus_rank_raw = normalize_table_value(row.get("focus_rank"))
     focus_rank = int(focus_rank_raw) if focus_rank_raw else None
+    attention_raw = normalize_table_value(row.get("attention_level"))
+    try:
+        attention_level = max(0, min(5, int(attention_raw))) if attention_raw else 0
+    except ValueError:
+        attention_level = existing.attention_level
     updated = update_record(
         existing,
         title=normalize_table_value(row.get("title")) or existing.title,
@@ -1938,6 +2012,7 @@ def record_from_table_row(row: dict, existing: KnowledgeRecord) -> KnowledgeReco
         next_steps=list(existing.next_steps),
         planning_bucket=normalize_table_value(row.get("planning_bucket")),
         focus_rank=focus_rank,
+        attention_level=attention_level,
     )
     return with_synced_hierarchy_title(updated)
 
@@ -2235,9 +2310,9 @@ def render_record_editor(
         status="inbox",
     )
 
-    title_col, entity_col = st.columns(2)
-    title = title_col.text_input("Cim", value=record.title, key=f"{key_prefix}_title")
-    entity_type = entity_col.selectbox(
+    title = st.text_input("Cim", value=record.title, key=f"{key_prefix}_title")
+    entity_status_people = st.columns(3)
+    entity_type = entity_status_people[0].selectbox(
         "Entitas tipus",
         ENTITY_OPTIONS,
         index=ENTITY_OPTIONS.index(record.entity_type) if record.entity_type in ENTITY_OPTIONS else 0,
@@ -2253,35 +2328,33 @@ def render_record_editor(
     show_planning = entity_type in {"task", "case", "project", "decision", "note", "source_item", "event"}
     show_next_steps = entity_type == "task"
 
-    parent_status_people = st.columns(3)
-    if show_parent:
-        with parent_status_people[0]:
-            parent_id = render_parent_selector(records, record.parent_id, key_prefix)
-    else:
-        parent_status_people[0].caption("Szulo rekord: nem relevans ehhez az entitashoz")
-        parent_id = ""
-
     if show_status:
-        status = parent_status_people[1].selectbox(
+        status = entity_status_people[1].selectbox(
             "Statusz",
             STATUS_OPTIONS,
             index=STATUS_OPTIONS.index(record.status) if record.status in STATUS_OPTIONS else 0,
             key=f"{key_prefix}_status",
         )
     else:
-        parent_status_people[1].caption("Statusz: nem relevans ehhez az entitashoz")
+        entity_status_people[1].caption("Statusz: nem relevans ehhez az entitashoz")
         status = record.status if record.status else "inbox"
 
     if show_people:
-        people_raw = parent_status_people[2].text_input(
+        people_raw = entity_status_people[2].text_input(
             "Kapcsolodo emberek",
             value=", ".join(record.related_people),
             help="Vesszovel elvalasztva",
             key=f"{key_prefix}_people",
         )
     else:
-        parent_status_people[2].caption("Kapcsolodo emberek: nem relevans ehhez az entitashoz")
+        entity_status_people[2].caption("Kapcsolodo emberek: nem relevans ehhez az entitashoz")
         people_raw = ""
+
+    if show_parent:
+        parent_id = render_parent_selector(records, record.parent_id, key_prefix)
+    else:
+        st.caption("Szulo rekord: nem relevans ehhez az entitashoz")
+        parent_id = ""
 
     visible_fields = hierarchy_fields_for(entity_type)
     hierarchy_values = {
@@ -2318,12 +2391,7 @@ def render_record_editor(
                 hierarchy_values[field_name] = ""
 
     if not allow_parent_edit:
-        if entity_type in {"area", "organization"}:
-            parent_id = record.parent_id
-        elif entity_type in {"team", "project", "case"}:
-            parent_id = infer_parent_from_hierarchy(records, entity_type, hierarchy_values, record.record_id)
-        else:
-            parent_id = record.parent_id or infer_parent_from_hierarchy(records, entity_type, hierarchy_values, record.record_id)
+        parent_id = record.parent_id
 
     if show_next_steps:
         step_col1, step_col2 = st.columns([2, 1])
@@ -2343,9 +2411,26 @@ def render_record_editor(
             key=f"{key_prefix}_next_step_estimate_minutes",
         )
         next_step_estimate = combine_estimate_parts(int(estimate_hours), int(estimate_minutes))
+        attention_options = list(range(0, 6))
+        attention_level = st.select_slider(
+            "Figyelmi szint",
+            options=attention_options,
+            value=record.attention_level if record.attention_level in attention_options else 0,
+            format_func=lambda value: {
+                0: "0 - nincs jelzés",
+                1: "1 - info",
+                2: "2 - figyelendő",
+                3: "3 - teendő",
+                4: "4 - sürgős",
+                5: "5 - danger zone",
+            }[value],
+            key=f"{key_prefix}_attention_level",
+            help="Task figyelmi hőmérő. A szülő ágak ezt aggregálva öröklik.",
+        )
     else:
         next_step = ""
         next_step_estimate = ""
+        attention_level = record.attention_level if record.entity_type == "task" else 0
 
     summary = st.text_area("Rovid osszefoglalo", value=record.summary, height=100, key=f"{key_prefix}_summary")
     meta_col1, meta_col2 = st.columns(2)
@@ -2517,6 +2602,7 @@ def render_record_editor(
         "next_steps": parse_next_steps(next_steps_raw),
         "planning_bucket": planning_bucket,
         "focus_rank": focus_rank_value,
+        "attention_level": int(attention_level or 0),
     }
 
 
@@ -2734,6 +2820,10 @@ def build_context_graph_payload(records: list[KnowledgeRecord], selected_node_id
             "has_obsidian_links": False if synthetic or not record else bool(record.obsidian_links),
             "next_step": "" if synthetic or not record else record.next_step,
             "next_step_estimate": "" if synthetic or not record else record.next_step_estimate,
+            "attention_level": 0 if synthetic or not record else int(record.attention_level or 0),
+            "attention_heat": 0,
+            "attention_count": 0,
+            "attention_high_count": 0,
             "hierarchy_level": 4,
         }
 
@@ -2846,6 +2936,38 @@ def build_context_graph_payload(records: list[KnowledgeRecord], selected_node_id
             node["hierarchy_level"] = actual_hierarchy_depth(node_id)
         else:
             node["hierarchy_level"] = 3
+
+    hierarchy_children: dict[str, list[str]] = {}
+    for edge in edges:
+        if edge["kind"] != "hierarchy":
+            continue
+        hierarchy_children.setdefault(edge["source"], []).append(edge["target"])
+
+    def attention_summary(node_id: str, seen: set[str] | None = None) -> tuple[int, int, int, int]:
+        seen = seen or set()
+        if node_id in seen:
+            return 0, 0, 0, 0
+        seen.add(node_id)
+        node = nodes.get(node_id, {})
+        own_level = int(node.get("attention_level") or 0) if node.get("entity_type") == "task" else 0
+        max_level = own_level
+        heat = own_level * own_level
+        count = 1 if own_level > 0 else 0
+        high_count = 1 if own_level >= 4 else 0
+        for child_id in hierarchy_children.get(node_id, []):
+            child_max, child_heat, child_count, child_high_count = attention_summary(child_id, set(seen))
+            max_level = max(max_level, child_max)
+            heat += child_heat
+            count += child_count
+            high_count += child_high_count
+        return max_level, heat, count, high_count
+
+    for node_id, node in nodes.items():
+        max_level, heat, count, high_count = attention_summary(node_id)
+        node["attention_level"] = max_level
+        node["attention_heat"] = min(100, heat)
+        node["attention_count"] = count
+        node["attention_high_count"] = high_count
 
     return {
         "mode": mode,
@@ -3509,6 +3631,7 @@ def app() -> None:
     history_events_path = config.history_events_path_for(source_dir)
     export_selection_path = config.export_selection_path_for(source_dir)
     export_dir = config.export_dir_for(source_dir)
+    ui_settings_path = config.app_dir_for(source_dir) / "ui_settings.json"
     records = load_records(records_path)
     planning_layout = ensure_layout(planning_layout_path)
     planning_titles = planning_bucket_titles(planning_layout)
@@ -3590,6 +3713,7 @@ def app() -> None:
                     next_steps=create_values["next_steps"],
                     planning_bucket=create_values["planning_bucket"],
                     focus_rank=create_values["focus_rank"],
+                    attention_level=create_values["attention_level"],
                 )
                 persist_record(record, source_dir, config, records_path, index_path, chroma_dir, history_events_path)
 
@@ -3660,6 +3784,7 @@ def app() -> None:
                     next_steps=edit_values["next_steps"],
                     planning_bucket=edit_values["planning_bucket"],
                     focus_rank=edit_values["focus_rank"],
+                    attention_level=edit_values["attention_level"],
                 )
                 persist_record(with_synced_hierarchy_title(updated_record), source_dir, config, records_path, index_path, chroma_dir, history_events_path)
             with st.expander("Globális history", expanded=False):
@@ -3840,6 +3965,7 @@ def app() -> None:
                         "event_at",
                         "next_step",
                         "next_step_estimate",
+                        "attention_level",
                         "planning_bucket",
                         "focus_rank",
                         "created_at",
@@ -3856,6 +3982,7 @@ def app() -> None:
                         "planning_bucket": st.column_config.SelectboxColumn("tervezesi hely", options=planning_options),
                         "next_step": st.column_config.TextColumn("next step"),
                         "next_step_estimate": st.column_config.TextColumn("becsult ido"),
+                        "attention_level": st.column_config.NumberColumn("figyelmi szint", min_value=0, max_value=5, step=1),
                         "due_at": st.column_config.TextColumn("due date"),
                         "deadline": st.column_config.TextColumn("deadline"),
                         "start_at": st.column_config.TextColumn("start date"),
@@ -4303,9 +4430,32 @@ def app() -> None:
             for error in folder_rule_errors:
                 st.warning(error)
             if tb_config:
+                tb_tag_map, tb_tag_map_errors = load_thunderbird_tag_map(tb_config)
                 roots_text = "\n".join(f"- `{root}`" for root in tb_config.mail_roots) or "-"
                 st.markdown(f"**Mail gyökerek**\n{roots_text}")
                 st.write(f"Folders MD: `{config.thunderbird_folders_md or '-'}`")
+                with st.expander("Thunderbird tag névfeloldás", expanded=False):
+                    if tb_tag_map:
+                        resolved_tags_text = "\n".join(
+                            f"- `{key}` -> {value}"
+                            for key, value in sorted(tb_tag_map.items())
+                            if key == key.lower() or key.startswith("$label")
+                        )
+                        st.markdown(resolved_tags_text or "- Nincs megjeleníthető tag.")
+                    else:
+                        st.markdown("- Nincs betöltött tag-térkép.")
+                    for error in tb_tag_map_errors:
+                        st.warning(error)
+                    if st.button("Tag források keresése", key="tb_scan_tag_sources"):
+                        with st.spinner("Thunderbird tag források keresése..."):
+                            tag_source_hits, tag_source_errors = scan_thunderbird_tag_sources(tb_config, tb_tag_map)
+                        st.session_state["tb_tag_source_hits"] = tag_source_hits
+                        st.session_state["tb_tag_source_errors"] = tag_source_errors
+                    tag_source_hits = st.session_state.get("tb_tag_source_hits", [])
+                    if tag_source_hits:
+                        st.dataframe(pd.DataFrame(tag_source_hits), use_container_width=True, hide_index=True)
+                    for error in st.session_state.get("tb_tag_source_errors", []):
+                        st.warning(error)
                 if folder_rules:
                     included_text = "\n".join(f"- `{path}`" for path in folder_rules.included_paths) or "- *(minden megengedett)*"
                     excluded_text = "\n".join(f"- `{path}`" for path in folder_rules.excluded_paths) or "- *(nincs külön tiltás)*"
@@ -4407,6 +4557,7 @@ def app() -> None:
                                     int(preview_since_days) if preview_since_days is not None else None,
                                     int(preview_limit_per_mailbox),
                                     preview_since_date,
+                                    tb_tag_map,
                                 )
                             st.session_state["tb_preview_items"] = [item.to_dict() for item in previews]
                             st.session_state["tb_preview_rows"] = enrich_thunderbird_preview_rows(
@@ -4428,6 +4579,9 @@ def app() -> None:
                     preview_rows = enrich_thunderbird_preview_rows(preview_rows, existing_values, planning_titles)
                     st.session_state["tb_preview_rows"] = preview_rows
                     preview_df = pd.DataFrame(preview_rows)
+                    tb_ui_settings = load_ui_settings(ui_settings_path).get("thunderbird_preview", {})
+                    if not isinstance(tb_ui_settings, dict):
+                        tb_ui_settings = {}
                     with st.expander("Preview szűrés és rendezés", expanded=True):
                         filter_col1, filter_col2, filter_col3, filter_col4 = st.columns(4)
                         tb_filter_text = filter_col1.text_input("Kifejezés", key="tb_preview_filter_text")
@@ -4460,10 +4614,27 @@ def app() -> None:
                             key="tb_preview_filter_modified",
                         )
                         sort_columns = [column for column in ["sent_at", "from", "to", "subject", "thunderbird_tags", "account", "mailbox", "suggested_scope", "suggested_bucket", "suggested_action"] if column in preview_df.columns]
-                        sort_col1, sort_col2, sort_col3 = st.columns(3)
-                        tb_sort_1 = sort_col1.selectbox("Rendezés 1", options=[""] + sort_columns, key="tb_preview_sort_1")
-                        tb_sort_2 = sort_col2.selectbox("Rendezés 2", options=[""] + sort_columns, key="tb_preview_sort_2")
-                        tb_sort_direction = sort_col3.selectbox("Irány", options=["desc", "asc"], format_func=lambda value: {"desc": "Csökkenő", "asc": "Növekvő"}[value], key="tb_preview_sort_direction")
+                        sort_col1, sort_col2, sort_col3, sort_col4 = st.columns(4)
+                        sort_1_options = [""] + sort_columns
+                        saved_sort_1 = st.session_state.get("tb_preview_sort_1", tb_ui_settings.get("sort_1", ""))
+                        saved_sort_2 = st.session_state.get("tb_preview_sort_2", tb_ui_settings.get("sort_2", ""))
+                        saved_sort_3 = st.session_state.get("tb_preview_sort_3", tb_ui_settings.get("sort_3", ""))
+                        saved_sort_direction = st.session_state.get("tb_preview_sort_direction", tb_ui_settings.get("sort_direction", "desc"))
+                        tb_sort_1 = sort_col1.selectbox("Rendezés 1", options=sort_1_options, index=sort_1_options.index(saved_sort_1) if saved_sort_1 in sort_1_options else 0, key="tb_preview_sort_1")
+                        tb_sort_2 = sort_col2.selectbox("Rendezés 2", options=sort_1_options, index=sort_1_options.index(saved_sort_2) if saved_sort_2 in sort_1_options else 0, key="tb_preview_sort_2")
+                        tb_sort_3 = sort_col3.selectbox("Rendezés 3", options=sort_1_options, index=sort_1_options.index(saved_sort_3) if saved_sort_3 in sort_1_options else 0, key="tb_preview_sort_3")
+                        tb_sort_direction = sort_col4.selectbox(
+                            "Irány",
+                            options=["desc", "asc"],
+                            index=["desc", "asc"].index(saved_sort_direction) if saved_sort_direction in ["desc", "asc"] else 0,
+                            format_func=lambda value: {"desc": "Csökkenő", "asc": "Növekvő"}[value],
+                            key="tb_preview_sort_direction",
+                        )
+                        update_ui_settings(
+                            ui_settings_path,
+                            "thunderbird_preview",
+                            {"sort_1": tb_sort_1, "sort_2": tb_sort_2, "sort_3": tb_sort_3, "sort_direction": tb_sort_direction},
+                        )
 
                     filtered_preview_df = preview_df.copy()
                     if tb_filter_text.strip():
@@ -4498,7 +4669,7 @@ def app() -> None:
                     elif tb_filter_modified == "original" and "suggestion_modified" in filtered_preview_df:
                         filtered_preview_df = filtered_preview_df[~filtered_preview_df["suggestion_modified"].astype(bool)]
 
-                    sort_by = [column for column in [tb_sort_1, tb_sort_2] if column]
+                    sort_by = [column for column in [tb_sort_1, tb_sort_2, tb_sort_3] if column]
                     if sort_by:
                         filtered_preview_df = filtered_preview_df.sort_values(by=sort_by, ascending=(tb_sort_direction == "asc"), kind="stable")
 
@@ -4519,6 +4690,7 @@ def app() -> None:
                         "mailbox",
                         "account",
                         "message_id",
+                        "email_mid_url",
                         "has_attachment",
                         "in_reply_to",
                         "references",
@@ -4526,16 +4698,20 @@ def app() -> None:
                         "thunderbird_tag_headers",
                     ]
                     default_visible_columns = [column for column in all_preview_columns if column in filtered_preview_df.columns and not column.startswith("original_")]
+                    saved_visible_columns = st.session_state.get("tb_preview_visible_columns", tb_ui_settings.get("visible_columns", default_visible_columns))
+                    if "email_mid_url" in default_visible_columns and "email_mid_url" not in saved_visible_columns:
+                        saved_visible_columns = list(saved_visible_columns) + ["email_mid_url"]
                     visible_columns = st.multiselect(
                         "Látható oszlopok",
                         options=default_visible_columns,
                         default=[
                             column
-                            for column in st.session_state.get("tb_preview_visible_columns", default_visible_columns)
+                            for column in saved_visible_columns
                             if column in default_visible_columns
                         ],
                         key="tb_preview_visible_columns",
                     )
+                    update_ui_settings(ui_settings_path, "thunderbird_preview", {"visible_columns": visible_columns})
                     table_columns = ["preview_id"] + [column for column in visible_columns if column != "preview_id"]
                     visible_ids = set(filtered_preview_df["preview_id"].astype(str).tolist()) if "preview_id" in filtered_preview_df else set()
                     bulk_col1, bulk_col2 = st.columns(2)
@@ -4559,7 +4735,7 @@ def app() -> None:
                         hide_index=True,
                         key="tb_preview_editor",
                         column_order=[column for column in table_columns if column in filtered_preview_df.columns],
-                        disabled=["preview_id", "from", "to", "subject", "thunderbird_tags", "cc", "sent_at", "mailbox", "account", "message_id", "has_attachment", "in_reply_to", "references", "body_preview", "thunderbird_tag_headers", "suggestion_modified"],
+                        disabled=["preview_id", "from", "to", "subject", "thunderbird_tags", "cc", "sent_at", "mailbox", "account", "message_id", "email_mid_url", "has_attachment", "in_reply_to", "references", "body_preview", "thunderbird_tag_headers", "suggestion_modified"],
                         column_config={
                             "selected": st.column_config.CheckboxColumn("upsert"),
                             "preview_id": st.column_config.TextColumn("id", width="small"),
@@ -4579,6 +4755,7 @@ def app() -> None:
                             "mailbox": st.column_config.TextColumn("mailbox"),
                             "account": st.column_config.TextColumn("fiók"),
                             "message_id": st.column_config.TextColumn("message-id"),
+                            "email_mid_url": st.column_config.LinkColumn("E-mail link", display_text="E-mail link"),
                             "has_attachment": st.column_config.CheckboxColumn("csatolmány"),
                             "in_reply_to": st.column_config.TextColumn("in-reply-to"),
                             "references": st.column_config.TextColumn("references"),
@@ -4604,6 +4781,31 @@ def app() -> None:
                             next_preview_rows.append(row)
                     st.session_state["tb_preview_rows"] = next_preview_rows
                     st.caption("Amíg itt csak preview-zol és nem nyomsz Upsertet, semmi nem kerül be a RAG-ba.")
+                    selected_preview_rows_for_export = [row for row in st.session_state.get("tb_preview_rows", []) if bool(row.get("selected"))]
+                    if selected_preview_rows_for_export:
+                        tb_md = render_thunderbird_preview_markdown(selected_preview_rows_for_export)
+                        md_col1, md_col2 = st.columns([2, 1])
+                        tb_md_filename = md_col1.text_input(
+                            "Thunderbird MD export fájlnév",
+                            value=st.session_state.get("tb_md_export_filename", f"thunderbird-preview-{datetime.now().strftime('%Y%m%d-%H%M')}.md"),
+                            key="tb_md_export_filename",
+                        )
+                        md_col2.download_button(
+                            "MD letöltés",
+                            data=tb_md,
+                            file_name=tb_md_filename if tb_md_filename.endswith(".md") else f"{tb_md_filename}.md",
+                            mime="text/markdown",
+                            key="tb_md_download",
+                        )
+                        with st.expander("Thunderbird MD export előnézet", expanded=False):
+                            st.code(tb_md, language="markdown")
+                        if st.button("MD export mentése", key="tb_md_save"):
+                            export_dir.mkdir(parents=True, exist_ok=True)
+                            export_path = export_dir / (tb_md_filename.strip() or f"thunderbird-preview-{datetime.now().strftime('%Y%m%d-%H%M')}.md")
+                            if export_path.suffix.lower() != ".md":
+                                export_path = export_path.with_suffix(".md")
+                            export_path.write_text(tb_md, encoding="utf-8")
+                            st.success(f"Thunderbird MD export mentve: {export_path}")
                     if st.button("Upsert a RAG-ba", key="tb_upsert_to_rag"):
                         rows = st.session_state.get("tb_preview_rows", [])
                         preview_item_lookup = {

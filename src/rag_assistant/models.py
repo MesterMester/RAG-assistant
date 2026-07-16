@@ -77,6 +77,7 @@ class KnowledgeRecord:
     planning_bucket: str = ""
     planning_order: int | None = None
     focus_rank: int | None = None
+    attention_level: int = 0
 
     def to_dict(self) -> dict:
         return asdict(self)
@@ -116,6 +117,7 @@ class KnowledgeRecord:
         payload.setdefault("planning_bucket", "")
         payload.setdefault("planning_order", None)
         payload.setdefault("focus_rank", None)
+        payload.setdefault("attention_level", 0)
         return cls(**payload)
 
     def to_search_text(self) -> str:
@@ -130,6 +132,7 @@ class KnowledgeRecord:
             self.content,
             self.next_step,
             self.next_step_estimate,
+            str(self.attention_level),
             " ".join(
                 " ".join(str(item.get(part, "")) for part in ["title", "estimate", "done"])
                 for item in self.next_steps
@@ -179,6 +182,7 @@ class KnowledgeRecord:
             "next_step_estimate": self.next_step_estimate,
             "planning_bucket": self.planning_bucket,
             "focus_rank": self.focus_rank if self.focus_rank is not None else "",
+            "attention_level": self.attention_level,
             "export_selected": False,
             "updated_at": self.updated_at,
         }

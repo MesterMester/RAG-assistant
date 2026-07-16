@@ -197,6 +197,20 @@
         flex-wrap: wrap;
         gap: 6px;
       }
+      .attention-bar {
+        margin-top: 7px;
+        height: 8px;
+        border-radius: 999px;
+        overflow: hidden;
+        background: rgba(148, 163, 184, 0.18);
+        border: 1px solid rgba(148, 163, 184, 0.22);
+      }
+      .attention-fill {
+        height: 100%;
+        width: var(--attention-width, 0%);
+        border-radius: 999px;
+        background: linear-gradient(90deg, #facc15, #fb923c, #ef4444);
+      }
       .toggle-btn {
         appearance: none;
         border: 1px solid rgba(148, 163, 184, 0.5);
@@ -223,6 +237,12 @@
         padding: 2px 7px;
         border-radius: 999px;
         background: rgba(148, 163, 184, 0.14);
+      }
+      .chip.attention {
+        background: rgba(254, 226, 226, 0.8);
+        border: 1px solid rgba(248, 113, 113, 0.35);
+        color: #991b1b;
+        font-weight: 800;
       }
       .shape {
         width: 12px;
@@ -724,10 +744,17 @@
             const childCount = (outgoing.get(node.id) || []).length;
             const isCollapsed = Boolean(collapsedState[node.id]);
             const hierarchyLevel = Number(node.hierarchy_level ?? 3);
+            const attentionLevel = Number(node.attention_level || 0);
+            const attentionHeat = Number(node.attention_heat || 0);
+            const attentionCount = Number(node.attention_count || 0);
+            const attentionHighCount = Number(node.attention_high_count || 0);
+            const attentionWidth = Math.min(100, Math.max(0, attentionHeat));
+            const heatOverlay = attentionHeat > 0 ? `box-shadow: inset 0 0 0 999px rgba(239, 68, 68, ${Math.min(0.22, 0.04 + attentionHeat / 520)}), 0 10px 20px rgba(15, 23, 42, 0.08);` : ``;
             const chips = [
               node.entity_type ? `<span class="chip">${escapeHtml(node.entity_type)}</span>` : ``,
               node.status ? `<span class="chip">${escapeHtml(node.status)}</span>` : ``,
               node.due_at ? `<span class="chip">due ${escapeHtml(node.due_at)}</span>` : ``,
+              attentionLevel ? `<span class="chip attention">🌡️ ${attentionLevel}${attentionCount > 1 ? ` / ${attentionCount}` : ``}${attentionHighCount > 1 ? ` 🔥${attentionHighCount}` : ``}</span>` : ``,
               node.has_note ? `<span class="chip">🗒️</span>` : ``,
               node.has_web_links ? `<span class="chip">🔗</span>` : ``,
               node.has_obsidian_links ? `<span class="chip">🪨</span>` : ``,
@@ -737,7 +764,7 @@
                 class="node ${shape} ${node.synthetic ? `synthetic` : ``} ${selectedId === node.id ? `selected` : ``}"
                 data-node-id="${escapeHtml(node.id)}"
                 data-selectable="${node.synthetic ? `false` : `true`}"
-                style="left:${pos.x}px;top:${pos.y}px;width:${pos.w}px;min-height:${pos.h}px;--accent:${accent};--accent-soft:${soft};"
+                style="left:${pos.x}px;top:${pos.y}px;width:${pos.w}px;min-height:${pos.h}px;--accent:${accent};--accent-soft:${soft};${heatOverlay}"
               >
                 <div class="node-title">
                   <span class="node-title-main level-${Math.min(3, hierarchyLevel)}"><span class="shape ${shape}" style="--accent:${accent};margin-right:8px;"></span>${node.icon ? `<span style="margin-right:6px;">${escapeHtml(node.icon)}</span>` : ``}${node.has_note ? `<span style="margin-right:6px;">🗒️</span>` : ``}${node.has_web_links ? `<span style="margin-right:6px;">🔗</span>` : ``}${node.has_obsidian_links ? `<span style="margin-right:6px;">🪨</span>` : ``}${escapeHtml(node.label)}</span>
@@ -747,6 +774,7 @@
                   </span>
                 </div>
                 ${node.next_step || node.next_step_estimate ? `<div class="node-extra">${node.next_step ? `<span class="chip">🥾 ${escapeHtml(node.next_step)}</span>` : ``}${node.next_step_estimate ? `<span class="chip">⏱️ ${escapeHtml(node.next_step_estimate)}</span>` : ``}</div>` : ``}
+                ${attentionLevel ? `<div class="attention-bar" title="Figyelmi hő: ${attentionHeat}"><div class="attention-fill" style="--attention-width:${attentionWidth}%;"></div></div>` : ``}
                 <div class="node-meta">${chips}</div>
               </div>
             `;
